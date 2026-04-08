@@ -115,6 +115,8 @@ def _make_args(**overrides: Any) -> argparse.Namespace:
         "max_cycles": 3,
         "model_context_window": 200000,
         "output": None,  # will be overridden by tests
+        "no_judge": True,  # default to True so existing tests don't make API calls
+        "judge_model": "claude-haiku-4-5",
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -249,3 +251,105 @@ class TestCmdCompactionCompare:
 
         data = json.loads((tmp_path / "report.json").read_text())
         assert "baseline" in data["results"]
+
+
+# ---------------------------------------------------------------------------
+# New tests: --no-judge and judge-on path
+# ---------------------------------------------------------------------------
+
+
+class TestJudgeIntegration:
+    def test_no_judge_flag_skips_scoring(self, tmp_path):
+        """--no-judge should skip report.md and scored_report.json."""
+        from headroom.evals.__main__ import cmd_compaction_compare
+
+        args = _make_args(output=str(tmp_path), no_judge=True)
+        cmd_compaction_compare(
+            args,
+            _anthropic_client=_FakeAnthropicClient(),
+            _load_dataset=_fake_load_dataset,
+        )
+
+        # Raw outputs must still exist
+        assert (tmp_path / "report.json").exists()
+        assert (tmp_path / "summary.txt").exists()
+        # Scored outputs should NOT be written
+        assert not (tmp_path / "report.md").exists()
+        assert not (tmp_path / "scored_report.json").exists()
+
+    def test_judge_on_writes_report_md(self, tmp_path, monkeypatch):
+        """Without --no-judge, report.md and scored_report.json should be written."""
+        from headroom.evals import __main__ as cli_module
+
+        fake_judge_fn = lambda q, gt, pred: (5.0, "ok")  # noqa: E731
+
+        def _fake_create_anthropic_judge(model: str = "claude-haiku-4-5", **kwargs):
+            return fake_judge_fn
+
+        monkeypatch.setattr(cli_module, "create_anthropic_judge", _fake_create_anthropic_judge)
+
+        args = _make_args(
+            output=str(tmp_path),
+            no_judge=False,
+            judge_model="claude-haiku-4-5",
+        )
+        from headroom.evals.__main__ import cmd_compaction_compare
+
+        cmd_compaction_compare(
+            args,
+            _anthropic_client=_FakeAnthropicClient(),
+            _load_dataset=_fake_load_dataset,
+        )
+
+        assert (tmp_path / "report.md").exists()
+        assert (tmp_path / "scored_report.json").exists()
+        # Raw report.json should also still exist
+        assert (tmp_path / "report.json").exists()
+
+    def test_judge_on_summary_includes_quality(self, tmp_path, monkeypatch):
+        """When judge runs, summary.txt should mention quality (enriched format)."""
+        from headroom.evals import __main__ as cli_module
+
+        fake_judge_fn = lambda q, gt, pred: (4.0, "good")  # noqa: E731
+
+        def _fake_create_anthropic_judge(model: str = "claude-haiku-4-5", **kwargs):
+            return fake_judge_fn
+
+        monkeypatch.setattr(cli_module, "create_anthropic_judge", _fake_create_anthropic_judge)
+
+        # Give cases ground_truth so judge is actually called
+        import json as _json
+
+        from headroom.evals.core import EvalCase, EvalSuite
+
+        def _loader_with_gt(name: str, **kwargs):
+            cases = []
+            for i in range(2):
+                sessions = [{"session_id": i, "messages": [f"event {i}"]}]
+                context = _json.dumps({"haystack_sessions": sessions})
+                cases.append(
+                    EvalCase(
+                        id=f"case_{i}",
+                        context=context,
+                        query="What happened?",
+                        ground_truth=f"answer_{i}",
+                    )
+                )
+            return EvalSuite(name="test_suite", cases=cases)
+
+        args = _make_args(
+            output=str(tmp_path),
+            no_judge=False,
+            judge_model="claude-haiku-4-5",
+        )
+        from headroom.evals.__main__ import cmd_compaction_compare
+
+        cmd_compaction_compare(
+            args,
+            _anthropic_client=_FakeAnthropicClient(),
+            _load_dataset=_loader_with_gt,
+        )
+
+        summary = (tmp_path / "summary.txt").read_text()
+        # Enriched summary should contain quality info
+        assert "quality" in summary.lower()

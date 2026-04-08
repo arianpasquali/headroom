@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from headroom.evals.memory.judge import create_anthropic_judge
+
 if TYPE_CHECKING:
     from headroom.evals.core import EvalResult
 
@@ -384,6 +386,27 @@ def cmd_compaction_compare(
                     file=sys.stderr,
                 )
 
+    # --- Quality scoring (unless --no-judge) ---
+    if not getattr(args, "no_judge", False):
+        from headroom.evals.reports.compaction_compare_report import save_reports, score_report
+
+        judge = create_anthropic_judge(model=getattr(args, "judge_model", "claude-haiku-4-5"))
+        scored = score_report(report, suite, judge)
+        paths = save_reports(scored, output_dir)
+        print("\nScored reports written:")
+        for fmt, path in paths.items():
+            print(f"  {fmt}: {path}")
+        # Print the headline table to stdout for immediate feedback
+        md_text = (output_dir / "report.md").read_text()
+        # Print up to the first blank line after the Results table
+        in_results = False
+        for line in md_text.splitlines():
+            print(line)
+            if line.startswith("## Results"):
+                in_results = True
+            elif in_results and line.startswith("## ") and not line.startswith("## Results"):
+                break
+
 
 def cmd_report(args: argparse.Namespace) -> None:
     """Generate HTML report from results."""
@@ -652,6 +675,19 @@ Install dependencies:
         "--model-context-window", type=int, default=200000, dest="model_context_window"
     )
     cc_parser.add_argument("-o", "--output", required=True, help="Output directory")
+    cc_parser.add_argument(
+        "--judge-model",
+        default="claude-haiku-4-5",
+        dest="judge_model",
+        help="Anthropic model to use for quality scoring (default: claude-haiku-4-5)",
+    )
+    cc_parser.add_argument(
+        "--no-judge",
+        action="store_true",
+        dest="no_judge",
+        default=False,
+        help="Skip quality scoring (useful for cheap dry runs)",
+    )
     cc_parser.set_defaults(func=cmd_compaction_compare)
 
     args = parser.parse_args()
