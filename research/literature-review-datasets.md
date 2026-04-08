@@ -234,3 +234,31 @@ quarter.
 - [lmsys/lmsys-chat-1m (HF)](https://huggingface.co/datasets/lmsys/lmsys-chat-1m)
 - [MultiChallenge paper — arxiv 2501.17399](https://arxiv.org/abs/2501.17399)
 - [MultiChallenge (ACL 2025)](https://aclanthology.org/2025.findings-acl.958/)
+
+---
+
+## Integration status (2026-04-08)
+
+Both picks are now loadable via `headroom.evals.datasets`:
+
+```python
+from headroom.evals.datasets import load_dataset_by_name
+
+# Nemotron-Agentic-v1 (tool-use modality gap)
+nemotron = load_dataset_by_name("nemotron_agentic_v1", n=200)
+
+# LongBench v1 multi-task suite (LLMLingua-2 head-to-head)
+longbench = load_dataset_by_name("longbench_v1_suite", n_per_task=50)
+```
+
+Registered names:
+- `nemotron_agentic_v1` (category: `tool_use`) — wraps `nvidia/Nemotron-Agentic-v1`,
+  splits each trajectory at the last user turn into `(context, query, ground_truth)`.
+- `longbench_v1_suite` (category: `long_context`) — concatenates the 16
+  LongBench v1 tasks from the LLMLingua-2 paper into a single EvalSuite with
+  per-case `metadata["task"]` so breakdowns remain possible.
+
+Tests: `tests/test_evals/test_dataset_loaders.py`
+- Unit tests use hand-built fixtures + monkeypatched `datasets.load_dataset`.
+- Integration smoke tests are guarded by `@pytest.mark.integration` and skipped
+  by default. Run locally with `pytest -m integration`.
