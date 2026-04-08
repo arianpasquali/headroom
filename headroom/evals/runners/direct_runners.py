@@ -1,0 +1,185 @@
+"""Simple baseline runners for LongMemEval cross-arm comparisons.
+
+Two non-iterative runners that serve as baselines:
+
+- BaselineRunner: sends the full haystack in a single LLM call.
+- HeadroomDefaultRunner: pre-compresses with ContentRouter, then makes
+  one LLM call with the compressed content.
+
+Both produce CompactionResult instances compatible with the other arms.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+
+import tiktoken
+
+from headroom.evals.core import EvalCase
+from headroom.evals.runners.provider_compaction import CompactionResult
+
+
+def _count_tokens(text: str) -> int:
+    """Count tokens using cl100k_base (ballpark for both Anthropic and OpenAI)."""
+    enc = tiktoken.get_encoding("cl100k_base")
+    return len(enc.encode(text))
+
+
+def _flatten_haystack(context: str) -> str:
+    """Parse LongMemEval JSON context and flatten haystack_sessions to text."""
+    data = json.loads(context)
+    sessions = data.get("haystack_sessions", [])
+    return "\n\n".join(json.dumps(sess) for sess in sessions)
+
+
+def _call_anthropic(client: object, model: str, max_tokens: int, input_text: str) -> str:
+    """Make a single Anthropic messages.create call and return answer text."""
+    response = client.messages.create(  # type: ignore[attr-defined]
+        model=model,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": input_text}],
+    )
+    return response.content[0].text
+
+
+def _call_openai(client: object, model: str, max_tokens: int, input_text: str) -> str:
+    """Make a single OpenAI responses.create call and return answer text."""
+    response = client.responses.create(  # type: ignore[attr-defined]
+        model=model,
+        input=input_text,
+        max_output_tokens=max_tokens,
+    )
+    return getattr(response, "output_text", "") or ""
+
+
+class BaselineRunner:
+    """Sends the full LongMemEval haystack to the LLM in a single call.
+
+    No compression is performed. This is the simplest possible baseline:
+    the model receives everything and is asked the question.
+    """
+
+    def __init__(
+        self,
+        client: object,
+        provider: str,  # "anthropic" or "openai"
+        model: str,
+        max_tokens: int = 1024,
+    ) -> None:
+        self._client = client
+        self._provider = provider
+        self._model = model
+        self._max_tokens = max_tokens
+
+    def run(self, case: EvalCase) -> CompactionResult:
+        haystack_blob = _flatten_haystack(case.context)
+        original_input_tokens = _count_tokens(haystack_blob)
+        input_text = haystack_blob + "\n\n" + case.query
+
+        start = time.monotonic()
+        try:
+            if self._provider == "anthropic":
+                answer = _call_anthropic(self._client, self._model, self._max_tokens, input_text)
+            else:
+                answer = _call_openai(self._client, self._model, self._max_tokens, input_text)
+        except Exception as exc:
+            latency_ms = (time.monotonic() - start) * 1000
+            return CompactionResult(
+                case_id=case.id,
+                answer="",
+                original_input_tokens=original_input_tokens,
+                final_input_tokens=original_input_tokens,
+                compression_ratio=0.0,
+                latency_ms=latency_ms,
+                n_iterations=1,
+                n_compactions=0,
+                error=str(exc),
+            )
+
+        latency_ms = (time.monotonic() - start) * 1000
+        return CompactionResult(
+            case_id=case.id,
+            answer=answer,
+            original_input_tokens=original_input_tokens,
+            final_input_tokens=original_input_tokens,
+            compression_ratio=0.0,
+            latency_ms=latency_ms,
+            n_iterations=1,
+            n_compactions=0,
+        )
+
+
+class HeadroomDefaultRunner:
+    """Pre-compresses the haystack with Headroom's ContentRouter, then sends one LLM call.
+
+    The compression ratio is computed in tokens (not characters) for
+    cross-arm comparability with the provider compaction runners.
+    """
+
+    def __init__(
+        self,
+        client: object,
+        provider: str,  # "anthropic" or "openai"
+        model: str,
+        max_tokens: int = 1024,
+        router_config: object = None,  # ContentRouterConfig | None
+    ) -> None:
+        self._client = client
+        self._provider = provider
+        self._model = model
+        self._max_tokens = max_tokens
+        self._router_config = router_config
+
+    def run(self, case: EvalCase) -> CompactionResult:
+        from headroom.transforms.content_router import ContentRouter, ContentRouterConfig
+
+        haystack_blob = _flatten_haystack(case.context)
+        original_input_tokens = _count_tokens(haystack_blob)
+
+        # Build ContentRouter (uses default config if none provided)
+        config = self._router_config if self._router_config is not None else ContentRouterConfig()
+        router = ContentRouter(config=config)
+
+        # Compress with question-aware mode
+        compression_result = router.compress(content=haystack_blob, question=case.query)
+        compressed_text = compression_result.compressed
+
+        final_input_tokens = _count_tokens(compressed_text)
+        compression_ratio = (
+            1 - (final_input_tokens / original_input_tokens) if original_input_tokens > 0 else 0.0
+        )
+
+        input_text = compressed_text + "\n\n" + case.query
+
+        start = time.monotonic()
+        try:
+            if self._provider == "anthropic":
+                answer = _call_anthropic(self._client, self._model, self._max_tokens, input_text)
+            else:
+                answer = _call_openai(self._client, self._model, self._max_tokens, input_text)
+        except Exception as exc:
+            latency_ms = (time.monotonic() - start) * 1000
+            return CompactionResult(
+                case_id=case.id,
+                answer="",
+                original_input_tokens=original_input_tokens,
+                final_input_tokens=final_input_tokens,
+                compression_ratio=compression_ratio,
+                latency_ms=latency_ms,
+                n_iterations=1,
+                n_compactions=0,
+                error=str(exc),
+            )
+
+        latency_ms = (time.monotonic() - start) * 1000
+        return CompactionResult(
+            case_id=case.id,
+            answer=answer,
+            original_input_tokens=original_input_tokens,
+            final_input_tokens=final_input_tokens,
+            compression_ratio=compression_ratio,
+            latency_ms=latency_ms,
+            n_iterations=1,
+            n_compactions=0,
+        )
