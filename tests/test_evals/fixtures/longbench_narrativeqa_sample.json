@@ -1,0 +1,32 @@
+[
+  {
+    "_id": "fix-lb-001",
+    "dataset": "narrativeqa",
+    "language": "en",
+    "context": "Alice walked into the forest on a crisp autumn morning. She had packed a small lunch and was looking forward to a long hike.",
+    "input": "What season was it when Alice walked into the forest?",
+    "answers": ["autumn"],
+    "length": 20,
+    "all_classes": []
+  },
+  {
+    "_id": "fix-lb-002",
+    "dataset": "narrativeqa",
+    "language": "en",
+    "context": "The detective examined the room carefully. A broken vase lay on the floor and the window was wide open.",
+    "input": "What was broken in the room?",
+    "answers": ["the vase", "a vase"],
+    "length": 18,
+    "all_classes": []
+  },
+  {
+    "_id": "fix-lb-003",
+    "dataset": "narrativeqa",
+    "language": "en",
+    "context": "The spaceship approached Mars at dawn. Captain Vega ordered the crew to begin descent procedures.",
+    "input": "Who ordered the descent?",
+    "answers": ["Captain Vega"],
+    "length": 15,
+    "all_classes": []
+  }
+]
