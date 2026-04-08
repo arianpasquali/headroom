@@ -250,15 +250,66 @@ Dropped arms (kept in repo as documented architectural dead-ends):
 
 ---
 
-## What's still ahead
+## Real run — N=50 results (Apr 8, ~30 min wall-clock)
 
-1. **3-arm × N=5 smoke with judge** — final validation pass. Cost ~$3-5.
-2. **3-arm × N=50 real run** — the headline experiment. Cost ~$20-40.
-3. **Update RES-333** with the conclusion + the report.
-4. **Optional Phase 2:**
-   - LongBench v1 suite (LLMLingua-2 head-to-head publishable benchmark)
-   - τ-bench probe + loader (genuine multi-tool agentic dataset where Anthropic's compaction_control could be tested in its natural habitat — recovers the dropped anthropic_compact arm honestly)
-   - Streamlit space extension (visual exploration of the precomputed JSON results)
+After Smoke 4 (3 arms × N=2 with adjusted summary_prompt params + judge) showed clean pipeline behaviour, ran the full N=50 sweep in `eval_results/compaction_compare/longmemeval/anthropic/n50/`.
+
+**Configuration:**
+- Dataset: LongMemEval `longmemeval_s_cleaned`, first 50 records (all `single-session-user` due to file ordering)
+- Arms: `baseline`, `headroom_default`, `summary_prompt`
+- Answer model: `claude-sonnet-4-5-20250929`
+- Summary model: `claude-haiku-4-5`
+- Judge model: `claude-haiku-4-5`
+- `--model-context-window 128000 --trigger-fill 0.55 --chunk-token-size 15000 --keep-recent 2 --max-tokens 256`
+
+### Headline result
+
+| arm | n | compression | quality | **Δ vs baseline** | latency p50 |
+|---|---|---|---|---|---|
+| baseline | 50 | 0% | 52.0% (26/50) | — | 7.1s |
+| **headroom_default** | 50 | **54.3%** | **74.0%** (37/50) | **+22pp** ⬆ | **4.4s** ⬆ |
+| summary_prompt | 50 | 39.5% | 50.0% (25/50) | -2pp | 8.5s |
+
+**Headroom at 54% compression beats uncompressed baseline by 22 percentage points AND is 38% faster.** The N=5 smoke finding (+20pp) replicated cleanly at N=50, ruling out noise.
+
+### What's likely happening
+
+The "lost in the middle" effect — LLMs lose attention on irrelevant tokens in long contexts — is well-documented for needle-in-haystack benchmarks like LongMemEval. Headroom's `ContentRouter` adaptively compresses by removing low-information content (filler dialogue, repeated context, etc.) while preserving anomalies and high-information items via the SmartCrusher relevance scoring path. With 110k tokens reduced to ~50k, the model has less haystack to lose its place in. **The net effect on a needle-in-haystack benchmark is improved recall *and* lower latency.**
+
+This is consistent with the broader finding from the LongMemEval paper that some memory systems beat oracle full-context retrieval because they remove distractors. Headroom is doing the same thing at the API-call layer rather than at a memory-store layer.
+
+### Feature A's verdict
+
+`summary_prompt` (Haiku 4.5 structured-JSON summarization at 55% fill) lands at:
+- **39.5% compression** — less than Headroom
+- **50.0% quality** — essentially baseline (-2pp, within noise)
+- **8.5s latency** — *worse* than baseline (+1.4s) due to the extra Haiku call
+
+**Feature A's hypothesis ("a small dedicated summarization call can preserve quality at lower context cost") is technically validated** — quality is roughly preserved — **but it is strictly dominated by Headroom on this benchmark.** Headroom achieves more compression, better quality, AND lower latency. There's no axis on which Feature A wins.
+
+The likely root cause: the structured JSON schema (`decisions / constraints / rejected_paths / file_refs / facts`) is shaped for software-engineering or planning workflows. Most LongMemEval `single-session-user` questions ask about casual conversational facts like "what degree did I graduate with" or "how long is my commute" that don't fit those categories. A free-form summary prompt or a schema designed for the question types might do better. But for the meeting's go/no-go, **Feature A doesn't earn its place in the product** based on these results.
+
+### Important caveats
+
+1. **Single question type tested.** All 50 questions are `single-session-user`. The other 5 LongMemEval types (multi-session, temporal-reasoning, knowledge-update, single-session-assistant, single-session-preference) are untested. **The +22pp result may not generalize.** Multi-session reasoning could behave very differently — compression could destroy the cross-session links the model needs.
+2. **Single model tested.** Sonnet 4.5 only. The "lost in the middle" effect varies by model — newer models with stronger long-context training may not see the same gain.
+3. **Single benchmark tested.** Coding, RAG, multi-agent shared memory all untested.
+4. **Provider compaction comparison missing** because the APIs don't actually offer summarization compaction at the standard level. Documented architectural finding above.
+5. **Cost so far:** ~$10-15 across all smokes + the real run. Well within budget.
+
+### Recommendation for Kiran
+
+**Ship Headroom behind a feature flag for long-context memory workloads.** The data supports it. **Don't ship Feature A** — it's strictly dominated on this benchmark. Run a follow-up workstream on the other LongMemEval question types and at least one agentic benchmark (τ-bench) before declaring Headroom broadly applicable.
+
+---
+
+## What's still ahead (Phase 2 — optional)
+
+1. **N=50 across the other 5 LongMemEval question types** to verify the +22pp generalises (or doesn't). Highest priority follow-up. Requires either an `--start-offset` flag on the loader or a `--per-type` balanced sampler. Cost: another ~$30-40 per type tested.
+2. **τ-bench probe + loader** — genuine multi-tool agentic dataset where Anthropic's `compaction_control` could be tested in its natural habitat, recovering the dropped `anthropic_compact` arm honestly.
+3. **LongBench v1 suite** — the LLMLingua-2 head-to-head publishable benchmark, for a follow-up blog post.
+4. **Streamlit space extension** — visual exploration of the precomputed JSON results in `orq/headroom_reproduction`.
+5. **Update RES-333** with the conclusion + the report (pending user decision on phrasing and timing).
 
 ## Files of note
 
