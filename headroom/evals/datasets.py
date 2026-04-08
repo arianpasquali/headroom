@@ -561,6 +561,108 @@ def load_narrativeqa(
     return EvalSuite(name="NarrativeQA", cases=cases)
 
 
+# Map split name → filename in the longmemeval-cleaned HF repo
+_LONGMEMEVAL_SPLIT_FILES: dict[str, str] = {
+    "longmemeval_s_cleaned": "longmemeval_s_cleaned.json",
+    "longmemeval_m_cleaned": "longmemeval_m_cleaned.json",
+    "longmemeval_oracle": "longmemeval_oracle.json",
+}
+
+
+def load_longmemeval(
+    n: int = 100,
+    split: str = "longmemeval_s_cleaned",
+) -> EvalSuite:
+    """Load LongMemEval long-context conversational memory benchmark.
+
+    Each record in LongMemEval pairs a question with a long *haystack* of
+    prior conversation sessions (~104k tokens at p50 for the s_cleaned
+    split). The loader produces one EvalCase per question:
+
+    - context: JSON-serialized {haystack_sessions, haystack_dates} —
+      the long history that compression/compaction operates on.
+    - query: the question asked of that history.
+    - ground_truth: the canonical answer.
+
+    The file is a single large JSON array (277 MB for s_cleaned), so we
+    stream-parse it with ijson rather than loading the whole thing into
+    memory.
+
+    Dataset: https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned
+    License: MIT.
+
+    Args:
+        n: Number of questions to load.
+        split: One of "longmemeval_s_cleaned" (default, 500 Q),
+            "longmemeval_m_cleaned" (larger), or "longmemeval_oracle"
+            (oracle: only evidence sessions retained).
+
+    Returns:
+        EvalSuite with one EvalCase per question.
+    """
+    if split not in _LONGMEMEVAL_SPLIT_FILES:
+        valid = ", ".join(_LONGMEMEVAL_SPLIT_FILES)
+        raise ValueError(f"Unknown LongMemEval split '{split}'. Valid: {valid}")
+
+    try:
+        import ijson
+    except ImportError as e:
+        raise ImportError(
+            "load_longmemeval requires the 'ijson' package. "
+            "Install with: pip install 'headroom-ai[evals]'"
+        ) from e
+
+    from huggingface_hub import HfFileSystem
+
+    fs = HfFileSystem()
+    filename = _LONGMEMEVAL_SPLIT_FILES[split]
+    hf_path = f"datasets/xiaowu0162/longmemeval-cleaned/{filename}"
+
+    cases: list[EvalCase] = []
+    with fs.open(hf_path, "rb") as f:
+        parser = ijson.items(f, "item")
+        for record in parser:
+            if len(cases) >= n:
+                break
+
+            question_id = record.get("question_id") or f"longmemeval_{len(cases)}"
+            question = record.get("question") or ""
+            answer = record.get("answer")
+            question_type = record.get("question_type", "")
+            haystack_sessions = record.get("haystack_sessions") or []
+            haystack_dates = record.get("haystack_dates") or []
+
+            if not question or not haystack_sessions:
+                continue
+
+            context = json.dumps(
+                {
+                    "haystack_sessions": haystack_sessions,
+                    "haystack_dates": haystack_dates,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+            cases.append(
+                EvalCase(
+                    id=f"longmemeval_{question_id}",
+                    context=context,
+                    query=question,
+                    ground_truth=answer,
+                    metadata={
+                        "source": "LongMemEval",
+                        "split": split,
+                        "question_type": question_type,
+                        "num_sessions": len(haystack_sessions),
+                        "question_date": record.get("question_date", ""),
+                    },
+                )
+            )
+
+    return EvalSuite(name=f"LongMemEval_{split}", cases=cases)
+
+
 # =============================================================================
 # TOOL USE / FUNCTION CALLING DATASETS
 # =============================================================================
@@ -1353,6 +1455,12 @@ DATASET_REGISTRY: dict[str, dict[str, Any]] = {
     "narrativeqa": {
         "loader": load_narrativeqa,
         "description": "Story comprehension requiring narrative understanding",
+        "category": "long_context",
+        "default_n": 100,
+    },
+    "longmemeval": {
+        "loader": load_longmemeval,
+        "description": "LongMemEval — long-context conversational memory benchmark (~104k tokens/Q, 500 Q across 6 question types)",
         "category": "long_context",
         "default_n": 100,
     },

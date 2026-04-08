@@ -276,3 +276,112 @@ class TestDatasetRegistryWiring:
 
         with pytest.raises(ValueError, match="Unknown dataset"):
             load_dataset_by_name("does_not_exist")
+
+
+class TestLoadLongMemEval:
+    """Tests for load_longmemeval — uses ijson over a fake HfFileSystem.open."""
+
+    @pytest.fixture
+    def patch_hf_fs_longmemeval(self, monkeypatch):
+        """Patch HfFileSystem.open to return a BytesIO of the local fixture file."""
+        from io import BytesIO
+
+        fixture_bytes = (FIXTURES_DIR / "longmemeval_sample.json").read_bytes()
+
+        def fake_open(self, path, mode="rb", **kwargs):
+            return BytesIO(fixture_bytes)
+
+        from huggingface_hub import HfFileSystem
+
+        monkeypatch.setattr(HfFileSystem, "open", fake_open)
+
+    def test_returns_eval_suite_with_three_cases(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=10)
+
+        assert isinstance(suite, EvalSuite)
+        assert suite.name == "LongMemEval_longmemeval_s_cleaned"
+        assert len(suite.cases) == 3
+        assert all(isinstance(c, EvalCase) for c in suite.cases)
+
+    def test_case_id_uses_question_id(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=10)
+        ids = {c.id for c in suite.cases}
+
+        assert "longmemeval_fix-lme-001" in ids
+        assert "longmemeval_fix-lme-002" in ids
+        assert "longmemeval_fix-lme-003" in ids
+
+    def test_query_is_question_and_ground_truth_is_answer(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=10)
+        case = next(c for c in suite.cases if c.id == "longmemeval_fix-lme-001")
+
+        assert case.query == "What programming language did I say I prefer?"
+        assert case.ground_truth == "Python"
+
+    def test_context_contains_haystack_sessions(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=10)
+        case = next(c for c in suite.cases if c.id == "longmemeval_fix-lme-002")
+
+        # All three cats should appear in the serialized haystack
+        assert "Mochi" in case.context
+        assert "Luna" in case.context
+        assert "Pip" in case.context
+
+    def test_metadata_fields(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=10)
+        case = next(c for c in suite.cases if c.id == "longmemeval_fix-lme-002")
+
+        assert case.metadata["source"] == "LongMemEval"
+        assert case.metadata["split"] == "longmemeval_s_cleaned"
+        assert case.metadata["question_type"] == "multi-session"
+        assert case.metadata["num_sessions"] == 3
+        assert case.metadata["question_date"] == "2024/02/20 (Tue) 18:30"
+
+    def test_n_limits_number_of_cases(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=2)
+        assert len(suite.cases) == 2
+
+    def test_split_argument_affects_suite_name(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=10, split="longmemeval_oracle")
+        assert suite.name == "LongMemEval_longmemeval_oracle"
+
+
+class TestLongMemEvalRegistry:
+    @pytest.fixture
+    def patch_hf_fs_longmemeval(self, monkeypatch):
+        from io import BytesIO
+
+        fixture_bytes = (FIXTURES_DIR / "longmemeval_sample.json").read_bytes()
+
+        def fake_open(self, path, mode="rb", **kwargs):
+            return BytesIO(fixture_bytes)
+
+        from huggingface_hub import HfFileSystem
+
+        monkeypatch.setattr(HfFileSystem, "open", fake_open)
+
+    def test_listed_in_registry(self):
+        from headroom.evals.datasets import DATASET_REGISTRY
+
+        assert "longmemeval" in DATASET_REGISTRY
+        assert DATASET_REGISTRY["longmemeval"]["category"] == "long_context"
+
+    def test_load_dataset_by_name(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_dataset_by_name
+
+        suite = load_dataset_by_name("longmemeval", n=2)
+        assert len(suite.cases) == 2

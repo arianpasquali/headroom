@@ -1,0 +1,66 @@
+[
+  {
+    "question_id": "fix-lme-001",
+    "question_type": "single-session-user",
+    "question": "What programming language did I say I prefer?",
+    "answer": "Python",
+    "question_date": "2024/01/15 (Mon) 10:00",
+    "haystack_dates": ["2024/01/10 (Wed) 09:00", "2024/01/12 (Fri) 14:00"],
+    "haystack_session_ids": ["sess-a", "sess-b"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Hi, I'm a backend engineer."},
+        {"role": "assistant", "content": "Nice to meet you."},
+        {"role": "user", "content": "I prefer Python over Java for most tasks."},
+        {"role": "assistant", "content": "Python is a great choice."}
+      ],
+      [
+        {"role": "user", "content": "Today I deployed a service."},
+        {"role": "assistant", "content": "How did it go?"},
+        {"role": "user", "content": "Smooth — it was a Python FastAPI app."},
+        {"role": "assistant", "content": "Glad to hear it."}
+      ]
+    ],
+    "answer_session_ids": ["sess-a"]
+  },
+  {
+    "question_id": "fix-lme-002",
+    "question_type": "multi-session",
+    "question": "How many cats do I have in total?",
+    "answer": "Three",
+    "question_date": "2024/02/20 (Tue) 18:30",
+    "haystack_dates": ["2024/02/01 (Thu) 12:00", "2024/02/15 (Thu) 19:00", "2024/02/18 (Sun) 11:00"],
+    "haystack_session_ids": ["sess-c", "sess-d", "sess-e"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I just adopted a kitten named Mochi."},
+        {"role": "assistant", "content": "Congrats on Mochi!"}
+      ],
+      [
+        {"role": "user", "content": "My older cat Luna is jealous of Mochi."},
+        {"role": "assistant", "content": "That's normal during introductions."}
+      ],
+      [
+        {"role": "user", "content": "We adopted another rescue, a boy named Pip."},
+        {"role": "assistant", "content": "Three cats now!"}
+      ]
+    ],
+    "answer_session_ids": ["sess-c", "sess-d", "sess-e"]
+  },
+  {
+    "question_id": "fix-lme-003",
+    "question_type": "temporal-reasoning",
+    "question": "When did I start running?",
+    "answer": "March 2024",
+    "question_date": "2024/06/01 (Sat) 08:00",
+    "haystack_dates": ["2024/03/05 (Tue) 07:00"],
+    "haystack_session_ids": ["sess-f"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I started a couch-to-5k program today, March 5th."},
+        {"role": "assistant", "content": "Good luck with the program!"}
+      ]
+    ],
+    "answer_session_ids": ["sess-f"]
+  }
+]
