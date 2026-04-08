@@ -213,3 +213,36 @@ class TestLoadLongBenchV1Suite:
 
         suite = load_dataset_by_name("longbench_v1_suite", n_per_task=1)
         assert len(suite.cases) == len(LONGBENCH_V1_TASKS_EXPECTED)
+
+
+@pytest.mark.integration
+class TestRealHuggingFaceLoading:
+    """Smoke tests that hit the real HuggingFace Hub. Skipped by default.
+
+    Run with:
+        pytest tests/test_evals/test_dataset_loaders.py -m integration -v
+    """
+
+    def test_nemotron_agentic_v1_real_load(self):
+        pytest.importorskip("datasets")
+        from headroom.evals.datasets import load_nemotron_agentic_v1
+
+        suite = load_nemotron_agentic_v1(n=2, split="interactive_agent")
+
+        assert len(suite.cases) == 2
+        for case in suite.cases:
+            assert case.context  # non-empty
+            assert case.metadata["source"] == "Nemotron-Agentic-v1"
+            assert case.metadata["num_messages"] >= 1
+
+    def test_longbench_v1_suite_real_load_single_task(self):
+        pytest.importorskip("datasets")
+        from headroom.evals.datasets import load_longbench_v1_suite
+
+        # Only load narrativeqa to keep the download small.
+        suite = load_longbench_v1_suite(n_per_task=2, tasks=["narrativeqa"])
+
+        assert len(suite.cases) == 2
+        for case in suite.cases:
+            assert case.context
+            assert case.metadata["task"] == "narrativeqa"
