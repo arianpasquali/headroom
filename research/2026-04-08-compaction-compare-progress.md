@@ -132,21 +132,133 @@ Original plan swept `{25k, 50k, 100k}` to land arms near 67% compression on LoCo
 
 ---
 
+## Runner build (DONE — 5 steps × 5 commits)
+
+Built end-to-end via subagent-driven-development. Five additional commits land everything from raw runner classes to the CLI subcommand to the Δ-quality-first report renderer.
+
+### Commits added during the runner build
+
+| SHA | Subject |
+|---|---|
+| `6f61e3b` | feat(evals): add Anthropic and OpenAI compaction runners |
+| `28de0b6` | feat(evals): add Feature A summary-prompt runner |
+| `e321f5c` | feat(evals): add baseline+headroom_default runners and multi-arm driver |
+| `41a0d8c` | feat(evals): add compaction-compare CLI subcommand |
+| `51b359f` | feat(evals): score and render compaction-compare reports |
+
+### What got built
+
+- **`provider_compaction.py`** — `AnthropicCompactionRunner` (wraps `tool_runner` with `compaction_control` + dummy `read_history`/`submit_answer` tools to force multi-iteration), `OpenAICompactionRunner` (chains `responses.create` + `responses.compact`), and the canonical `CompactionResult` dataclass that all five arm runners produce.
+- **`summary_prompt.py`** — `SummaryPromptRunner` (Feature A): triggers at `trigger_fill * model_context_window`, calls Haiku 4.5 with a structured-output prompt that produces `{decisions, constraints, rejected_paths, file_refs, facts}` JSON, replaces summarized turns with a single system-role summary message, caps at `max_cycles` per case, never fires before `min_turn`.
+- **`direct_runners.py`** — `BaselineRunner` (single LLM call with the full haystack, compression_ratio = 0) and `HeadroomDefaultRunner` (pre-compress with `ContentRouter`, then single LLM call, token-based ratio).
+- **`compaction_compare.py`** — `CompactionCompareDriver` orchestrates a sweep across multiple arms, validates arm/provider compatibility at `__init__`, builds runners eagerly, runs each case through each arm, captures per-(arm, case) errors without aborting the whole sweep. `CompactionCompareConfig` carries all tunable knobs; `CompactionCompareReport` collects results.
+- **CLI subcommand** at `headroom/evals/__main__.py::cmd_compaction_compare` with 16 flags. Dependency-injected for tests (`_anthropic_client`, `_openai_client`, `_load_dataset` defaults to None for production).
+- **`compaction_compare_report.py`** — `score_report` (LLM-judge scored `ScoredCase` per result), per-arm `ArmAggregate` (Δ quality vs baseline, quality correct rate, latency p50/p95, per-question-type breakdown), `render_markdown` for the headline report, `render_json` for re-loading into the Streamlit space, `save_reports` to write `report.md` + `scored_report.json` + `summary.txt`.
+
+Test count: 27 (loaders) + 11 (provider runners) + 9 (summary_prompt) + 29 (direct + driver) + 8 (CLI) + 22 (scoring/render) = **106 unit tests, all green**, 2 integration tests deselected by default, 2 pre-existing skipped (trafilatura).
+
+---
+
+## Live smoke runs (Apr 8) — and the second pivot
+
+After the runner build was complete, smoke tested against real APIs to validate end-to-end before committing to the N=50 real run. **The smoke runs surfaced architectural problems with both provider compaction arms that triggered a second design pivot.**
+
+### Smoke 1 — baseline N=1 ($0.34)
+Validation pass. Baseline correctly answered "What degree did I graduate with?" → "You graduated with a degree in Business Administration." (ground truth: "Business Administration"). 113k tokens, 6.9s latency.
+
+### Smoke 2 — 3 arms × N=2, no judge (~$1.62)
+- baseline: 0% compression, 50% quality (1/2)
+- headroom_default: **56.4% compression**, 50% quality, 4.6s latency
+- summary_prompt: **0% compression** (silent no-op — see bug below)
+
+**Bug found:** with default `--model-context-window 200000` (Sonnet 4.5's actual window) and `--trigger-fill 0.70`, the summary_prompt arm fires only when current_tokens ≥ 140k. LongMemEval haystacks are ~110k → trigger never fires → arm silently behaves like baseline. Fix: pass `--model-context-window 128000` (or lower `--trigger-fill`) so the 70% threshold lands inside the haystack token range.
+
+### Smoke 3 — anthropic_compact N=1 (3-chunk variant, ~$0.80)
+Ran in 15s (much faster than the original 7-chunk attempt that hung at 22+ minutes). But:
+- **Wrong answer:** model said "no mention of any degree" when ground truth was clearly in the haystack and the baseline arm had answered correctly with a single call.
+- **Compaction never fired** (`n_compactions=0`) at threshold 70k even though cumulative iteration tokens grew to 136k. The SDK's compaction trigger is per-iteration `input_tokens`, not cumulative.
+- **Negative compression ratio** (-20%) because dummy tool calls inflate cumulative tokens above the original haystack.
+- **Original 7-chunk run that hung at 22 min** had stack traces in the kept output: `pydantic.ValidationError: 1 validation error for ... read_history: chunk_id Missing required argument` and the same for `submit_answer`. The model kept calling our dummy tools without arguments → pydantic rejected → SDK retried in a tight loop until timeout.
+
+**Root cause: the artificial multi-iteration scaffolding distorts model behavior, and the dummy tool surface is so unfamiliar to the model that it produces malformed calls.** Even with the bugs fixed, the artificiality remains a confound.
+
+### Smoke 4 — 3 arms × N=2 with adjusted summary_prompt params + judge (~$2)
+With `--model-context-window 128000 --trigger-fill 0.55 --chunk-token-size 15000 --keep-recent 2`:
+
+| arm | compression | quality | latency | compactions |
+|---|---|---|---|---|
+| baseline | 0% | 50% | 7.9s | 0 |
+| headroom_default | **56.4%** | 50% | 3.9s | 0 |
+| summary_prompt | **39.9%** | 50% | 7.3s | 1.0 |
+
+**Three arms producing real signal.** Quality is 50% across all arms because N=2 is too small — both arms got 1/2 questions right. Promising: Headroom and Feature A both compress meaningfully without losing the answers.
+
+### Smoke 5 — openai_compact N=1 (~$0.10)
+**Architectural dead-end found.**
+```
+error: Error code: 400 — Previous response with id 'resp_0e01...' not found.
+```
+The runner called `responses.compact()`, got back a `CompactedResponse`, then tried to use its `id` as `previous_response_id` for the next `responses.create()` call. OpenAI rejected it.
+
+### Direct API probe — what `responses.compact()` actually does
+
+5-line probe against the real OpenAI API (`gpt-4o-mini`) revealed:
+
+1. `responses.create(input="Remember: my favorite color is teal.")` → r1.id = `resp_0b88...c38f4`
+2. `responses.compact(input="What is my favorite color?", previous_response_id=r1.id)` → CompactedResponse with `output = [user_msg, user_msg, compaction_item]`. **No assistant response in the output.** It's an inspection view of the compacted state, not a model call.
+3. `responses.create(input="Tell me my favorite color.", previous_response_id=c2.id)` → **400 previous_response_not_found**
+4. `responses.create(input="What is my favorite color?", previous_response_id=r1.id)` → **works fine, returns** `'Your favorite color is teal!'`
+
+**Conclusion: `responses.compact()` is an analytics endpoint** that returns a snapshot of how the conversation would be compacted. Its result ID is not chainable. There is no way to "compact and continue" a conversation through this API.
+
+### What OpenAI actually ships for context management
+
+`responses.create(truncation="auto")` — when the input exceeds the model's context window, OpenAI drops items from the beginning of the conversation. This is **lossy first-N-tokens dropping**, not summarization. With gpt-4o-mini's 128k window and LongMemEval at ~104k, truncation never even fires.
+
+### What Anthropic actually ships for context management
+
+Two distinct mechanisms:
+
+1. **`messages.create(context_management={edits: [clear_tool_uses_20250919, clear_thinking_20251015]})`** — server-side lossy clearing of tool uses or thinking content when input crosses a threshold. **No-op on LongMemEval** (no tool uses, no thinking turns).
+2. **`beta.messages.tool_runner(compaction_control={enabled: True, ...})`** — client-side helper inside the Anthropic Python SDK at `anthropic/lib/tools/_beta_compaction_control.py`. When cumulative tokens cross the threshold inside a tool_runner loop, the SDK invokes the model with a `DEFAULT_SUMMARY_PROMPT` (a structured prompt with task overview, current state, important discoveries, next steps, context to preserve), summarizes prior messages, and replaces the conversation history. **Only fires inside tool_runner iterations** — requires multi-iteration tool-using workflows. Forcing it onto a non-tool benchmark like LongMemEval requires artificial dummy-tool scaffolding that distorts both tokens and model behavior (per Smoke 3).
+
+### The reframed picture
+
+| Provider | Mechanism | Type | Works on LongMemEval? |
+|---|---|---|---|
+| Anthropic | `messages.create(context_management=clear_tool_uses)` | Lossy clear | No-op (no tool uses) |
+| Anthropic | `tool_runner(compaction_control=...)` | Summarization | Only with artificial scaffolding (broken) |
+| OpenAI | `responses.create(truncation="auto")` | Lossy truncate | Only fires if input > context window |
+| OpenAI | `responses.compact()` | Inspection-only | Returns analytics snapshot, not chainable |
+
+**Neither provider ships summarization-based compaction at the standard API level for non-tool-using benchmarks.** Bauke's framing on RES-333 ("openai compaction, anthropic compaction") was a reasonable assumption that doesn't match the actual API surfaces. **This is itself a noteworthy finding for the report** — it strengthens the case for Headroom + Feature A by showing they fill a real market gap.
+
+### Second pivot — drop both provider compaction arms
+
+The headline experiment narrows from 5 arms to **3 honestly-comparable arms**:
+
+1. **baseline** — uncompressed long context
+2. **headroom_default** — Headroom's `ContentRouter` (lossless adaptive compression)
+3. **summary_prompt** — Feature A (Haiku 4.5 structured-output summarization at 55% fill)
+
+Dropped arms (kept in repo as documented architectural dead-ends):
+- ~~anthropic_compact~~ — runner code stays for τ-bench follow-up but excluded from the headline
+- ~~openai_compact~~ — runner code stays as a documented inspection-API wrapper
+
+### Total smoke spend
+~$5.30 across 5 smoke runs. The findings were worth every cent — they prevented a $30+ "real run" that would have produced two arms of garbage.
+
+---
+
 ## What's still ahead
 
-This is the runner-build phase. Five steps from the master plan:
-
-1. **Provider-compaction adapters** (`headroom/evals/runners/provider_compaction.py` — new). Two thin classes: `AnthropicCompactionRunner` wrapping `client.beta.messages.tool_runner(..., compaction_control=...)`, and `OpenAICompactionRunner` wrapping `client.responses.create()` + `client.responses.compact()`. Both return per-case results that slot into the existing `EvalResult` dataclass (`headroom/evals/core.py:68-123`).
-
-2. **Feature A summary-prompt strategy** (`headroom/evals/runners/summary_prompt.py` — new). The Haiku 4.5 custom summary the user proposed: triggers at 70% context fill, structured JSON output (decisions / constraints / rejected_paths / file_refs), never on turns 1-3, max 3 cycles per session.
-
-3. **Multi-arm driver** — extend `headroom/evals/memory/runner_v3.py` with an `arms` parameter so a single LongMemEval pass can iterate each question through every requested arm and tag results with the arm label. No changes to scoring or judge logic.
-
-4. **CLI entrypoint** — add `compaction-compare` subcommand to `headroom/evals/__main__.py` that takes `--dataset longmemeval -n 50 --arms ... --threshold ... --provider ... -o ...`.
-
-5. **Report card extension** — add Δ-quality-first per-arm comparison table to `headroom/evals/reports/report_card.py`. Headline column is `Δ quality vs baseline`; supporting columns are compression ratio, p50/p95 latency, accuracy by question type, cost, compaction-event count.
-
-6. **(Optional, time permitting)** — extend the `space/src/streamlit_app.py` HF Space to load and visualise the precomputed JSON results.
+1. **3-arm × N=5 smoke with judge** — final validation pass. Cost ~$3-5.
+2. **3-arm × N=50 real run** — the headline experiment. Cost ~$20-40.
+3. **Update RES-333** with the conclusion + the report.
+4. **Optional Phase 2:**
+   - LongBench v1 suite (LLMLingua-2 head-to-head publishable benchmark)
+   - τ-bench probe + loader (genuine multi-tool agentic dataset where Anthropic's compaction_control could be tested in its natural habitat — recovers the dropped anthropic_compact arm honestly)
+   - Streamlit space extension (visual exploration of the precomputed JSON results)
 
 ## Files of note
 
