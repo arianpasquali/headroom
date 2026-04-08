@@ -439,6 +439,66 @@ def load_longbench(
     return EvalSuite(name=f"LongBench_{task}", cases=cases)
 
 
+# LLMLingua-2 reports on these 16 LongBench v1 tasks. Keep this list in sync
+# with the LLMLingua-2 paper (Pan et al., 2024) Table 3 so head-to-head
+# comparisons stay apples-to-apples.
+LONGBENCH_V1_TASKS: list[str] = [
+    "narrativeqa",
+    "qasper",
+    "multifieldqa_en",
+    "hotpotqa",
+    "2wikimqa",
+    "musique",
+    "gov_report",
+    "qmsum",
+    "multi_news",
+    "trec",
+    "triviaqa",
+    "samsum",
+    "passage_count",
+    "passage_retrieval_en",
+    "lcc",
+    "repobench-p",
+]
+
+
+def load_longbench_v1_suite(
+    n_per_task: int = 50,
+    tasks: list[str] | None = None,
+) -> EvalSuite:
+    """Load multiple LongBench v1 tasks into one EvalSuite.
+
+    This is the canonical LLMLingua-2 comparison surface: by default it
+    covers the 16 tasks LLMLingua-2 reports on, so Headroom numbers can be
+    plotted head-to-head against published prompt-compression baselines.
+
+    Each underlying task is loaded via ``load_longbench(task, n=n_per_task)``
+    and the resulting cases are concatenated. Case metadata records the
+    source task name so per-task breakdowns remain possible.
+
+    Dataset: https://huggingface.co/datasets/THUDM/LongBench
+
+    Args:
+        n_per_task: Number of samples to load from each task.
+        tasks: Optional explicit task list. Defaults to LONGBENCH_V1_TASKS.
+
+    Returns:
+        EvalSuite named ``"LongBench_v1_suite"`` with all cases concatenated.
+    """
+    task_list = tasks if tasks is not None else LONGBENCH_V1_TASKS
+
+    all_cases: list[EvalCase] = []
+    for task in task_list:
+        try:
+            task_suite = load_longbench(n=n_per_task, task=task)
+        except ValueError:
+            # A single task failing to load must not kill the whole suite.
+            continue
+        all_cases.extend(task_suite.cases)
+
+    return EvalSuite(name="LongBench_v1_suite", cases=all_cases)
+
+
 def load_narrativeqa(
     n: int = 100,
     split: str = "test",
@@ -1283,6 +1343,12 @@ DATASET_REGISTRY: dict[str, dict[str, Any]] = {
         "description": "Long context understanding (4K-128K tokens)",
         "category": "long_context",
         "default_n": 50,
+    },
+    "longbench_v1_suite": {
+        "loader": load_longbench_v1_suite,
+        "description": "LongBench v1 — 16-task suite for LLMLingua-2 head-to-head comparisons",
+        "category": "long_context",
+        "default_n": None,
     },
     "narrativeqa": {
         "loader": load_narrativeqa,

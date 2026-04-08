@@ -20,6 +20,26 @@ def _load_longbench_fixture() -> list[dict]:
     return json.loads((FIXTURES_DIR / "longbench_narrativeqa_sample.json").read_text())
 
 
+LONGBENCH_V1_TASKS_EXPECTED = [
+    "narrativeqa",
+    "qasper",
+    "multifieldqa_en",
+    "hotpotqa",
+    "2wikimqa",
+    "musique",
+    "gov_report",
+    "qmsum",
+    "multi_news",
+    "trec",
+    "triviaqa",
+    "samsum",
+    "passage_count",
+    "passage_retrieval_en",
+    "lcc",
+    "repobench-p",
+]
+
+
 class _FakeHFDataset:
     """Minimal stand-in for a HuggingFace Dataset: iterable of dicts + __len__."""
 
@@ -155,3 +175,41 @@ class TestNemotronRegistry:
 
         suite = load_dataset_by_name("nemotron_agentic_v1", n=10)
         assert len(suite.cases) == 3
+
+
+class TestLoadLongBenchV1Suite:
+    def test_returns_suite_covering_all_llmlingua2_tasks(self, patch_hf_load_dataset_longbench):
+        from headroom.evals.datasets import LONGBENCH_V1_TASKS, load_longbench_v1_suite
+
+        # Constant must match the LLMLingua-2 reported task list exactly.
+        assert LONGBENCH_V1_TASKS == LONGBENCH_V1_TASKS_EXPECTED
+
+        suite = load_longbench_v1_suite(n_per_task=2)
+
+        # The fixture has 3 rows; n_per_task=2 → 2 cases per task × 16 tasks = 32.
+        assert suite.name == "LongBench_v1_suite"
+        assert len(suite.cases) == len(LONGBENCH_V1_TASKS_EXPECTED) * 2
+
+    def test_case_metadata_includes_task_name(self, patch_hf_load_dataset_longbench):
+        from headroom.evals.datasets import load_longbench_v1_suite
+
+        suite = load_longbench_v1_suite(n_per_task=1)
+        tasks_seen = {c.metadata["task"] for c in suite.cases}
+
+        assert tasks_seen == set(LONGBENCH_V1_TASKS_EXPECTED)
+
+    def test_case_id_is_prefixed_by_task(self, patch_hf_load_dataset_longbench):
+        from headroom.evals.datasets import load_longbench_v1_suite
+
+        suite = load_longbench_v1_suite(n_per_task=1)
+        for case in suite.cases:
+            assert case.id.startswith(f"longbench_{case.metadata['task']}_")
+
+    def test_registry_entry(self, patch_hf_load_dataset_longbench):
+        from headroom.evals.datasets import DATASET_REGISTRY, load_dataset_by_name
+
+        assert "longbench_v1_suite" in DATASET_REGISTRY
+        assert DATASET_REGISTRY["longbench_v1_suite"]["category"] == "long_context"
+
+        suite = load_dataset_by_name("longbench_v1_suite", n_per_task=1)
+        assert len(suite.cases) == len(LONGBENCH_V1_TASKS_EXPECTED)
