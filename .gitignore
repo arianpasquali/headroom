@@ -190,3 +190,6 @@ docs/superpowers/
 
 # Managed platform (separate private repo)
 headroom-managed/
+
+# Git worktrees (local isolated workspaces)
+.worktrees/
