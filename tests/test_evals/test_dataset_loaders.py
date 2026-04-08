@@ -359,6 +359,44 @@ class TestLoadLongMemEval:
         suite = load_longmemeval(n=10, split="longmemeval_oracle")
         assert suite.name == "LongMemEval_longmemeval_oracle"
 
+    def test_question_type_filter_yields_only_matching_records(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=10, question_type="multi-session")
+
+        # Only fixture-002 in the sample is multi-session
+        assert len(suite.cases) == 1
+        assert suite.cases[0].id == "longmemeval_fix-lme-002"
+        assert suite.cases[0].metadata["question_type"] == "multi-session"
+
+    def test_question_type_filter_other_type(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=10, question_type="temporal-reasoning")
+
+        # Only fixture-003 in the sample is temporal-reasoning
+        assert len(suite.cases) == 1
+        assert suite.cases[0].id == "longmemeval_fix-lme-003"
+
+    def test_question_type_filter_appends_to_suite_name(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=10, question_type="multi-session")
+        assert suite.name == "LongMemEval_longmemeval_s_cleaned_multi-session"
+
+    def test_question_type_filter_unknown_type_yields_empty(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=10, question_type="not-a-real-type")
+        assert len(suite.cases) == 0
+
+    def test_question_type_none_returns_all(self, patch_hf_fs_longmemeval):
+        from headroom.evals.datasets import load_longmemeval
+
+        suite = load_longmemeval(n=10, question_type=None)
+        # Same as the default — 3 records, all types preserved
+        assert len(suite.cases) == 3
+
 
 class TestLongMemEvalRegistry:
     @pytest.fixture

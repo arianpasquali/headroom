@@ -572,6 +572,7 @@ _LONGMEMEVAL_SPLIT_FILES: dict[str, str] = {
 def load_longmemeval(
     n: int = 100,
     split: str = "longmemeval_s_cleaned",
+    question_type: str | None = None,
 ) -> EvalSuite:
     """Load LongMemEval long-context conversational memory benchmark.
 
@@ -596,6 +597,12 @@ def load_longmemeval(
         split: One of "longmemeval_s_cleaned" (default, 500 Q),
             "longmemeval_m_cleaned" (larger), or "longmemeval_oracle"
             (oracle: only evidence sessions retained).
+        question_type: Optional filter — only yield records whose
+            question_type matches. The s_cleaned split contains 6 types:
+            "multi-session", "temporal-reasoning", "knowledge-update",
+            "single-session-user", "single-session-assistant",
+            "single-session-preference". When None, all types are included
+            (file order, which groups by type in the upstream).
 
     Returns:
         EvalSuite with one EvalCase per question.
@@ -618,6 +625,10 @@ def load_longmemeval(
     filename = _LONGMEMEVAL_SPLIT_FILES[split]
     hf_path = f"datasets/xiaowu0162/longmemeval-cleaned/{filename}"
 
+    suite_name = f"LongMemEval_{split}"
+    if question_type is not None:
+        suite_name = f"{suite_name}_{question_type}"
+
     cases: list[EvalCase] = []
     with fs.open(hf_path, "rb") as f:
         parser = ijson.items(f, "item")
@@ -625,10 +636,13 @@ def load_longmemeval(
             if len(cases) >= n:
                 break
 
+            record_qtype = record.get("question_type", "")
+            if question_type is not None and record_qtype != question_type:
+                continue
+
             question_id = record.get("question_id") or f"longmemeval_{len(cases)}"
             question = record.get("question") or ""
             answer = record.get("answer")
-            question_type = record.get("question_type", "")
             haystack_sessions = record.get("haystack_sessions") or []
             haystack_dates = record.get("haystack_dates") or []
 
@@ -653,14 +667,14 @@ def load_longmemeval(
                     metadata={
                         "source": "LongMemEval",
                         "split": split,
-                        "question_type": question_type,
+                        "question_type": record_qtype,
                         "num_sessions": len(haystack_sessions),
                         "question_date": record.get("question_date", ""),
                     },
                 )
             )
 
-    return EvalSuite(name=f"LongMemEval_{split}", cases=cases)
+    return EvalSuite(name=suite_name, cases=cases)
 
 
 # =============================================================================

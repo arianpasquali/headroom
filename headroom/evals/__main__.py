@@ -280,10 +280,14 @@ def cmd_compaction_compare(
     if _load_dataset is None:
         from headroom.evals.datasets import load_dataset_by_name as _load_dataset
 
+    extra_kwargs: dict = {}
+    if args.dataset == "longmemeval" and getattr(args, "question_type", None):
+        extra_kwargs["question_type"] = args.question_type
+
     if args.dataset == "longbench_v1_suite":
         suite = _load_dataset(args.dataset, n_per_task=args.n)
     else:
-        suite = _load_dataset(args.dataset, n=args.n)
+        suite = _load_dataset(args.dataset, n=args.n, **extra_kwargs)
 
     # --- Build config and driver ---
     config = CompactionCompareConfig(
@@ -654,6 +658,17 @@ Install dependencies:
         "--dataset", default="longmemeval", help="Dataset name from DATASET_REGISTRY"
     )
     cc_parser.add_argument("-n", "--n", type=int, default=50, dest="n", help="Number of cases")
+    cc_parser.add_argument(
+        "--question-type",
+        dest="question_type",
+        default=None,
+        help=(
+            "LongMemEval-only: filter to a single question_type. One of: "
+            "multi-session, temporal-reasoning, knowledge-update, "
+            "single-session-user, single-session-assistant, "
+            "single-session-preference. Ignored for other datasets."
+        ),
+    )
     cc_parser.add_argument(
         "--arms",
         default="baseline,headroom_default,anthropic_compact,summary_prompt",
