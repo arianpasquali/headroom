@@ -246,3 +246,33 @@ class TestRealHuggingFaceLoading:
         for case in suite.cases:
             assert case.context
             assert case.metadata["task"] == "narrativeqa"
+
+
+class TestDatasetRegistryWiring:
+    def test_list_available_datasets_includes_both(self):
+        from headroom.evals.datasets import list_available_datasets
+
+        by_category = list_available_datasets()
+
+        assert "nemotron_agentic_v1" in by_category["tool_use"]
+        assert "longbench_v1_suite" in by_category["long_context"]
+
+    def test_load_dataset_by_name_nemotron(self, patch_hf_load_dataset_nemotron):
+        from headroom.evals.datasets import load_dataset_by_name
+
+        suite = load_dataset_by_name("nemotron_agentic_v1", n=2)
+        assert suite.name.startswith("Nemotron-Agentic-v1_")
+        assert len(suite.cases) == 2
+
+    def test_load_dataset_by_name_longbench_v1_suite(self, patch_hf_load_dataset_longbench):
+        from headroom.evals.datasets import load_dataset_by_name
+
+        suite = load_dataset_by_name("longbench_v1_suite", n_per_task=1)
+        assert suite.name == "LongBench_v1_suite"
+        assert len(suite.cases) == 16  # one per task
+
+    def test_unknown_dataset_raises_with_helpful_error(self):
+        from headroom.evals.datasets import load_dataset_by_name
+
+        with pytest.raises(ValueError, match="Unknown dataset"):
+            load_dataset_by_name("does_not_exist")
