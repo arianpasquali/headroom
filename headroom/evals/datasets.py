@@ -598,6 +598,107 @@ def load_bfcl(
     return EvalSuite(name=f"BFCL_{category}", cases=cases)
 
 
+def load_nemotron_agentic_v1(
+    n: int = 100,
+    split: str = "interactive_agent",
+) -> EvalSuite:
+    """Load NVIDIA Nemotron-Agentic-v1 multi-turn tool-use trajectories.
+
+    Each trajectory is a synthetic multi-turn conversation where an agent
+    reasons, calls tools, and responds to tool output. The loader splits
+    each trajectory at the last user turn:
+
+    - context: JSON-serialized {tools, prior_messages} — what Headroom compresses
+    - query: text of the last user message
+    - ground_truth: text of the assistant's response that follows (if any)
+
+    Dataset: https://huggingface.co/datasets/nvidia/Nemotron-Agentic-v1
+    License: CC BY 4.0 (commercial use permitted).
+
+    Args:
+        n: Number of trajectories to load.
+        split: Dataset split — "interactive_agent" (19k) or "tool_calling" (316k).
+
+    Returns:
+        EvalSuite with one EvalCase per trajectory.
+    """
+    _check_datasets_installed()
+    from datasets import load_dataset
+
+    ds = load_dataset("nvidia/Nemotron-Agentic-v1", split=split)
+
+    cases: list[EvalCase] = []
+    for i, item in enumerate(ds):
+        if len(cases) >= n:
+            break
+
+        messages = item.get("messages") or []
+        tools = item.get("tools") or []
+        uuid = item.get("uuid") or f"nemotron_{i}"
+
+        if not messages:
+            continue
+
+        # Find the index of the last user turn.
+        last_user_idx = None
+        for idx in range(len(messages) - 1, -1, -1):
+            if messages[idx].get("role") == "user":
+                last_user_idx = idx
+                break
+
+        if last_user_idx is None:
+            continue  # No user turn — skip
+
+        prior = messages[:last_user_idx]  # everything before the last user turn
+        last_user = messages[last_user_idx]
+        after = messages[last_user_idx + 1 :]
+
+        # ground_truth = first assistant message after the last user turn that has
+        # substantive content (not just a tool-call dispatch).  Intermediate tool
+        # interactions (tool_calls with no plain content, tool results) are folded
+        # into the context so that the full agentic loop is preserved.
+        ground_truth: str | None = None
+        context_tail: list[dict] = []  # messages after last_user that go into context
+        for msg in after:
+            if msg.get("role") == "assistant" and msg.get("content") and not msg.get("tool_calls"):
+                # This is the substantive assistant response (no pending tool
+                # calls) — use as ground truth.
+                ground_truth = msg["content"]
+                break
+            # Tool-call dispatches (assistant messages that also carry
+            # tool_calls), tool results, and any other roles are part of the
+            # agentic reasoning chain → fold into context.
+            context_tail.append(msg)
+
+        # context = JSON of {tools, messages up to and including the last user
+        # turn, plus any intermediate tool-call/result exchanges}
+        context_obj = {
+            "tools": tools,
+            "messages": prior + [last_user] + context_tail,
+        }
+        context = json.dumps(context_obj, ensure_ascii=False, indent=2)
+
+        query = last_user.get("content") or ""
+
+        cases.append(
+            EvalCase(
+                id=f"nemotron_{uuid}",
+                context=context,
+                query=query,
+                ground_truth=ground_truth,
+                metadata={
+                    "source": "Nemotron-Agentic-v1",
+                    "split": split,
+                    "num_messages": len(messages),
+                    "num_tools": len(tools) if isinstance(tools, list) else 0,
+                    "license": item.get("license", "cc-by-4.0"),
+                },
+            )
+        )
+
+    return EvalSuite(name=f"Nemotron-Agentic-v1_{split}", cases=cases)
+
+
 def load_toolbench(
     n: int = 100,
     category: str = "G1",
@@ -1199,6 +1300,12 @@ DATASET_REGISTRY: dict[str, dict[str, Any]] = {
     "toolbench": {
         "loader": load_toolbench,
         "description": "Real-world API tool usage scenarios",
+        "category": "tool_use",
+        "default_n": 100,
+    },
+    "nemotron_agentic_v1": {
+        "loader": load_nemotron_agentic_v1,
+        "description": "NVIDIA Nemotron-Agentic-v1 — multi-turn synthetic tool-use trajectories (CC-BY-4.0)",
         "category": "tool_use",
         "default_n": 100,
     },
