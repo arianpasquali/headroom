@@ -35,6 +35,18 @@ QUESTION_TYPES = [
     "single-session-preference",
 ]
 
+# When a question type has been rerun (e.g. with the rate-limit retry code),
+# the canonical report should prefer the rerun directory. The aggregator
+# checks `<type>_rerun/scored_report.json` first and falls back to `<type>/`.
+#
+# temporal-reasoning_rerun (Apr 9 13:46): rerun with rate-limit retry code.
+#   Original run had 4/30 baseline rate-limit errors; rerun completed 30/30
+#   successfully across all three arms. Confirms baseline=0.0% is real, and
+#   also flipped the "which 2 of 30 did Headroom vs summary_prompt answer"
+#   stochastic outcome — exposing that temporal-reasoning signal is noise
+#   at the 2/30 level.
+RERUN_PRIORITY: set[str] = {"temporal-reasoning"}
+
 
 def load_scored(path: Path) -> dict | None:
     if not path.exists():
@@ -75,9 +87,20 @@ def main() -> None:
     if headline is not None:
         reports["single-session-user"] = headline
 
-    # Per-type sweeps
+    # Per-type sweeps. For types in RERUN_PRIORITY, prefer the `<type>_rerun`
+    # directory when present and log which directory was used.
+    source_by_type: dict[str, str] = {"single-session-user": "n50/"}
     for qtype in QUESTION_TYPES[1:]:
-        scored = load_scored(BY_TYPE / qtype / "scored_report.json")
+        scored = None
+        if qtype in RERUN_PRIORITY:
+            rerun_path = BY_TYPE / f"{qtype}_rerun" / "scored_report.json"
+            scored = load_scored(rerun_path)
+            if scored is not None:
+                source_by_type[qtype] = f"by_type/{qtype}_rerun/"
+        if scored is None:
+            scored = load_scored(BY_TYPE / qtype / "scored_report.json")
+            if scored is not None:
+                source_by_type[qtype] = f"by_type/{qtype}/"
         if scored is not None:
             reports[qtype] = scored
 
@@ -202,13 +225,14 @@ def main() -> None:
     lines.append("")
     lines.append("## Sample sizes")
     lines.append("")
-    lines.append("| question type | n | n errors |")
-    lines.append("|---|---|---|")
+    lines.append("| question type | source | n | n errors (baseline) |")
+    lines.append("|---|---|---|---|")
     for qtype, scored in reports.items():
         b = aggregates_by_arm(scored).get("baseline")
         n = b["n_cases"] if b else 0
         err = b["n_errors"] if b else 0
-        lines.append(f"| {qtype} | {n} | {err} |")
+        src = source_by_type.get(qtype, "—")
+        lines.append(f"| {qtype} | `{src}` | {n} | {err} |")
 
     # Headline interpretation block
     lines.append("")

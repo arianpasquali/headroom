@@ -9,16 +9,16 @@ N=30 sweeps across the other 5 LongMemEval question types. Built by
 | arm | single-session-user | multi-session | temporal-reasoning | knowledge-update | single-session-assistant | single-session-preference | grand mean |
 |---|---|---|---|---|---|---|---|
 | baseline | 52.0% | 16.7% | 0.0% | 46.7% | 56.7% | 10.0% | 30.3% |
-| headroom_default | 74.0% | 30.0% | 0.0% | 70.0% | 93.3% | 33.3% | 50.1% |
-| summary_prompt | 50.0% | 20.0% | 6.7% | 50.0% | 70.0% | 23.3% | 36.7% |
+| headroom_default | 74.0% | 30.0% | 6.7% | 70.0% | 93.3% | 33.3% | 51.2% |
+| summary_prompt | 50.0% | 20.0% | 0.0% | 50.0% | 70.0% | 23.3% | 35.6% |
 
 ## Δ quality vs baseline (per question type)
 
 | arm | single-session-user | multi-session | temporal-reasoning | knowledge-update | single-session-assistant | single-session-preference | grand mean |
 |---|---|---|---|---|---|---|---|
 | baseline (reference) | — | — | — | — | — | — | — |
-| headroom_default | +22.0pp | +13.3pp | +0.0pp | +23.3pp | +36.7pp | +23.3pp | +19.8pp |
-| summary_prompt | -2.0pp | +3.3pp | +6.7pp | +3.3pp | +13.3pp | +13.3pp | +6.3pp |
+| headroom_default | +22.0pp | +13.3pp | +6.7pp | +23.3pp | +36.7pp | +23.3pp | +20.9pp |
+| summary_prompt | -2.0pp | +3.3pp | +0.0pp | +3.3pp | +13.3pp | +13.3pp | +5.2pp |
 
 ## Compression ratio (final / original tokens)
 
@@ -32,20 +32,20 @@ N=30 sweeps across the other 5 LongMemEval question types. Built by
 
 | arm | single-session-user | multi-session | temporal-reasoning | knowledge-update | single-session-assistant | single-session-preference | grand mean |
 |---|---|---|---|---|---|---|---|
-| baseline | 7100ms | 9680ms | 9428ms | 9696ms | 8965ms | 11926ms | 9466ms |
-| headroom_default | 4375ms | 5927ms | 5670ms | 4131ms | 5101ms | 7561ms | 5461ms |
-| summary_prompt | 8489ms | 9631ms | 9207ms | 8477ms | 9351ms | 11600ms | 9459ms |
+| baseline | 7100ms | 9680ms | 7924ms | 9696ms | 8965ms | 11926ms | 9215ms |
+| headroom_default | 4375ms | 5927ms | 6424ms | 4131ms | 5101ms | 7561ms | 5586ms |
+| summary_prompt | 8489ms | 9631ms | 8812ms | 8477ms | 9351ms | 11600ms | 9393ms |
 
 ## Sample sizes
 
-| question type | n | n errors |
-|---|---|---|
-| single-session-user | 50 | 0 |
-| multi-session | 30 | 12 |
-| temporal-reasoning | 30 | 4 |
-| knowledge-update | 30 | 3 |
-| single-session-assistant | 30 | 7 |
-| single-session-preference | 30 | 10 |
+| question type | source | n | n errors (baseline) |
+|---|---|---|---|
+| single-session-user | `n50/` | 50 | 0 |
+| multi-session | `by_type/multi-session/` | 30 | 12 |
+| temporal-reasoning | `by_type/temporal-reasoning_rerun/` | 30 | 0 |
+| knowledge-update | `by_type/knowledge-update/` | 30 | 3 |
+| single-session-assistant | `by_type/single-session-assistant/` | 30 | 7 |
+| single-session-preference | `by_type/single-session-preference/` | 30 | 10 |
 
 ## Headline interpretation
 

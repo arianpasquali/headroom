@@ -72,7 +72,9 @@ Karina's LoCoMo curve is monotonically decreasing: more compression → less acc
 | knowledge-update | 46.7% | 70.0% | +23.3 |
 | single-session-user (headline) | 52.0% | 74.0% | +22.0 |
 | multi-session | 16.7% | 30.0% | +13.3 |
-| temporal-reasoning | 0.0% | 0.0% | 0.0 |
+| temporal-reasoning (rerun) | 0.0% | 6.7% | +6.7 (noise) |
+
+*Note on temporal-reasoning:* a clean rerun (Apr 9 13:46, with the rate-limit retry code) confirmed baseline=0.0% at full N=30 and showed the 6.7% Headroom "win" is stochastic — the 2/30 correctly-answered questions flipped identity between the original run (summary_prompt) and the rerun (Headroom). See the main RES-333 report §5.3 for the full analysis.
 
 **This doesn't contradict Karina — it extends her finding.** LoCoMo tops out at ~21k tokens (full conversation), which is why it failed our token-length gate in the first place. At 21k tokens Sonnet 4.5 is comfortably inside its attention budget, so compression is a pure tradeoff. At ~110k tokens LongMemEval pushes past the "lost in the middle" threshold and removing distractors becomes a **net quality win**. The LongMemEval paper's own finding that some memory systems beat oracle full-context retrieval generalises directly to in-context compression once the haystack is long enough.
 
@@ -82,7 +84,7 @@ Karina estimated LLM time saved at ~0.05 ms/token (from Sonnet's ~20k tok/s inpu
 
 ### 3.3 "Temporal drops first" holds at scale — and gets worse
 
-On LoCoMo, "Temporal" was the category that dropped first at low context limits. On LongMemEval at ~110k we see the terminal form of that failure: `temporal-reasoning` is 0% across **both** baseline *and* Headroom. Sonnet 4.5 at 110k tokens cannot do time arithmetic over haystack sessions. It is not a compression problem; it is a Sonnet-4.5-at-long-context problem. Worth its own RES ticket.
+On LoCoMo, "Temporal" was the category that dropped first at low context limits. On LongMemEval at ~110k we see the terminal form of that failure: **baseline is 0% across the full clean rerun of N=30**, and Headroom and summary_prompt hover at 0–7% depending on which 2 of 30 questions happen to get the stochastic right answer. No arm has a real signal. Sonnet 4.5 at 110k tokens cannot do time arithmetic over haystack sessions. It is not a compression problem; it is a Sonnet-4.5-at-long-context problem. Worth its own RES ticket.
 
 ### 3.4 The "accuracy threshold" is question-type dependent
 
@@ -107,9 +109,9 @@ Karina's reproduction is Headroom-only. We took RES-333's literal framing ("comp
 
 ### 4.2 Summary-prompt is schema-shaped
 
-Feature A (Haiku 4.5 structured summary with `decisions / constraints / rejected_paths / file_refs / facts`) was tested in parallel with Headroom. It achieves ~40% compression cleanly but is **dominated by Headroom on 5 of 6 types**. The root cause we can identify: the schema is shaped for SWE/planning workloads, not for casual conversational recall ("what degree did I graduate with", "how long is my commute"). Karina's reproduction doesn't evaluate a summary-prompt alternative, so this is a new (negative) finding.
+Feature A (Haiku 4.5 structured summary with `decisions / constraints / rejected_paths / file_refs / facts`) was tested in parallel with Headroom. It achieves ~40% compression cleanly but is **dominated or tied by Headroom on all 6 types**. The root cause we can identify: the schema is shaped for SWE/planning workloads, not for casual conversational recall ("what degree did I graduate with", "how long is my commute"). Karina's reproduction doesn't evaluate a summary-prompt alternative, so this is a new (negative) finding.
 
-**Counter-nuance:** Feature A is the only arm that clears 0% on temporal-reasoning (+6.7pp) and posts modest positive deltas on 5 of 6 types (grand mean +6.3pp). A schema redesign for conversational tasks might flip the verdict — not a dead end, just schema-shaped.
+**Counter-nuance:** Feature A posts modest positive deltas on 4 of 6 types and a grand-mean Δ of +5.2pp. The technique itself is not a dead end — a schema redesign for conversational tasks is the obvious next experiment. (In the first run, Feature A appeared to be "the only arm clearing 0% on temporal-reasoning"; the rerun flipped that, showing the 6.7% was a 2/30 stochastic artefact rather than signal.)
 
 ### 4.3 End-to-end LLM-judged quality, not keyword presence
 
