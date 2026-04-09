@@ -7,6 +7,8 @@
 
 Companion to the full RES-333 report at [`research/2026-04-09-res-333-report.md`](./2026-04-09-res-333-report.md). This file is deliberately scoped to *just* the comparison — pull the main report for full methodology, caveats, and recommendations.
 
+> ⚠ **See also:** [`research/2026-04-09-evaluation-plan-revision.md`](./2026-04-09-evaluation-plan-revision.md) — evaluation plan correction triggered by the discovery of Anthropic's `compact_20260112` server-side feature and the session memory cookbook pattern, both of which post-date our SDK and were missed in the original cross-arm investigation. Neither affects Karina's reproduction comparison directly (her work was Headroom-only), but they change how the "what we learned that the reproduction doesn't cover" section in §4 should be read — specifically §4.1 "Provider compaction doesn't exist" is half-wrong for Anthropic.
+
 ---
 
 ## 1. What the Streamlit reproduction does
