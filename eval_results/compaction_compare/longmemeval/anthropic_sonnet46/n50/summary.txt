@@ -1,0 +1,3 @@
+baseline: n=50/150 | quality=40.0% | delta=+0.0% | compression=0.0% | latency_p50=6754ms | user_visible_p50=6754ms | mean_cost=$0.3756
+headroom_default: n=50/150 | quality=82.0% | delta=+42.0% | compression=54.2% | latency_p50=4667ms | user_visible_p50=4667ms | mean_cost=$0.1727
+anthropic_compact_v2: n=50/150 | quality=54.0% | delta=+14.0% | compression=99.7% | latency_p50=8660ms | user_visible_p50=8660ms | mean_cost=$0.3792
