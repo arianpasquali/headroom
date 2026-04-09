@@ -17,7 +17,32 @@ import time
 import tiktoken
 
 from headroom.evals.core import EvalCase
-from headroom.evals.runners.provider_compaction import CompactionResult
+from headroom.evals.runners._rate_limit import retry_on_rate_limit
+from headroom.evals.runners.provider_compaction import (
+    CompactionResult,
+    _cost_from_usage,
+)
+
+
+def _anthropic_rate_limit_exceptions() -> tuple[type[BaseException], ...]:
+    """Lazily resolve the anthropic SDK's RateLimitError class.
+
+    Kept out of module-level imports so tests can run without the SDK installed
+    and so import of this module doesn't hard-fail on environments that only
+    use the OpenAI path. Returns an empty tuple when the SDK is missing, which
+    makes `retry_on_rate_limit` a pass-through.
+
+    Only `RateLimitError` (HTTP 429) is retried; broader `APIStatusError`
+    covers non-retryable failures like 400/401/404 that should propagate.
+    """
+    try:
+        import anthropic  # type: ignore[import-not-found]
+    except ImportError:
+        return ()
+    cls = getattr(anthropic, "RateLimitError", None)
+    if isinstance(cls, type) and issubclass(cls, BaseException):
+        return (cls,)
+    return ()
 
 
 def _count_tokens(text: str) -> int:
@@ -33,24 +58,57 @@ def _flatten_haystack(context: str) -> str:
     return "\n\n".join(json.dumps(sess) for sess in sessions)
 
 
-def _call_anthropic(client: object, model: str, max_tokens: int, input_text: str) -> str:
-    """Make a single Anthropic messages.create call and return answer text."""
-    response = client.messages.create(  # type: ignore[attr-defined]
-        model=model,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": input_text}],
-    )
-    return response.content[0].text
+def _call_anthropic(
+    client: object, model: str, max_tokens: int, input_text: str
+) -> tuple[str, float]:
+    """Make a single Anthropic messages.create call.
+
+    Returns ``(answer_text, cost_usd)``. Wraps the SDK call in a
+    ``retry_on_rate_limit`` loop so long-context runs that exceed the org-level
+    tokens/minute ceiling wait out the rolling window instead of hard-failing
+    the whole case. See ``_rate_limit.py`` for backoff behaviour.
+
+    Cost is computed from the response ``usage`` object using the
+    per-model pricing registered in
+    ``headroom/providers/anthropic.py::ANTHROPIC_PRICING``, which is
+    falling back to pattern-matching (opus/sonnet/haiku) for unknown slugs.
+    """
+
+    def _do_call() -> tuple[str, float]:
+        response = client.messages.create(  # type: ignore[attr-defined]
+            model=model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": input_text}],
+        )
+        text = response.content[0].text
+        # Test fakes may not provide a usage attribute; default cost to 0.0.
+        usage = getattr(response, "usage", None)
+        cost = _cost_from_usage(model, usage) if usage is not None else 0.0
+        return text, cost
+
+    retry_exceptions = _anthropic_rate_limit_exceptions()
+    if not retry_exceptions:
+        return _do_call()
+    return retry_on_rate_limit(_do_call, retry_exceptions=retry_exceptions)
 
 
-def _call_openai(client: object, model: str, max_tokens: int, input_text: str) -> str:
-    """Make a single OpenAI responses.create call and return answer text."""
+def _call_openai(
+    client: object, model: str, max_tokens: int, input_text: str
+) -> tuple[str, float]:
+    """Make a single OpenAI responses.create call.
+
+    Returns ``(answer_text, cost_usd)``. Cost is left at 0.0 for now — the
+    pricing table in ``headroom/providers/anthropic.py`` covers Claude
+    only, and we aren't running OpenAI arms in the current headline, so
+    plumbing OpenAI pricing is out of scope for this change.
+    """
     response = client.responses.create(  # type: ignore[attr-defined]
         model=model,
         input=input_text,
         max_output_tokens=max_tokens,
     )
-    return getattr(response, "output_text", "") or ""
+    text = getattr(response, "output_text", "") or ""
+    return text, 0.0
 
 
 class BaselineRunner:
@@ -80,9 +138,13 @@ class BaselineRunner:
         start = time.monotonic()
         try:
             if self._provider == "anthropic":
-                answer = _call_anthropic(self._client, self._model, self._max_tokens, input_text)
+                answer, cost = _call_anthropic(
+                    self._client, self._model, self._max_tokens, input_text
+                )
             else:
-                answer = _call_openai(self._client, self._model, self._max_tokens, input_text)
+                answer, cost = _call_openai(
+                    self._client, self._model, self._max_tokens, input_text
+                )
         except Exception as exc:
             latency_ms = (time.monotonic() - start) * 1000
             return CompactionResult(
@@ -107,6 +169,7 @@ class BaselineRunner:
             latency_ms=latency_ms,
             n_iterations=1,
             n_compactions=0,
+            cost_usd=cost,
         )
 
 
@@ -155,9 +218,13 @@ class HeadroomDefaultRunner:
         start = time.monotonic()
         try:
             if self._provider == "anthropic":
-                answer = _call_anthropic(self._client, self._model, self._max_tokens, input_text)
+                answer, cost = _call_anthropic(
+                    self._client, self._model, self._max_tokens, input_text
+                )
             else:
-                answer = _call_openai(self._client, self._model, self._max_tokens, input_text)
+                answer, cost = _call_openai(
+                    self._client, self._model, self._max_tokens, input_text
+                )
         except Exception as exc:
             latency_ms = (time.monotonic() - start) * 1000
             return CompactionResult(
@@ -182,4 +249,5 @@ class HeadroomDefaultRunner:
             latency_ms=latency_ms,
             n_iterations=1,
             n_compactions=0,
+            cost_usd=cost,
         )

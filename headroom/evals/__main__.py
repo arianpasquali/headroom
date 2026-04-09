@@ -260,7 +260,11 @@ def cmd_compaction_compare(
         try:
             import anthropic as _anthropic_sdk
 
-            _anthropic_client = _anthropic_sdk.Anthropic()
+            # Long-context runs regularly trip the org-level 2M tokens/min cap.
+            # The SDK default of 2 client-side retries is too small; bump to 10
+            # so transient 429s get absorbed by the SDK's built-in `retry-after`
+            # handling before our runner-level retry_on_rate_limit wrapper kicks in.
+            _anthropic_client = _anthropic_sdk.Anthropic(max_retries=10)
         except ImportError:
             print(
                 "Error: 'anthropic' SDK not installed. Run: pip install anthropic", file=sys.stderr
@@ -290,6 +294,8 @@ def cmd_compaction_compare(
         suite = _load_dataset(args.dataset, n=args.n, **extra_kwargs)
 
     # --- Build config and driver ---
+    # Use getattr with defaults for the new arm-specific flags so older
+    # test fixtures that build a bare argparse.Namespace still work.
     config = CompactionCompareConfig(
         arms=arms,
         provider=args.provider,
@@ -303,6 +309,17 @@ def cmd_compaction_compare(
         min_turn=args.min_turn,
         max_cycles=args.max_cycles,
         model_context_window=args.model_context_window,
+        compact_v2_trigger_input_tokens=getattr(args, "compact_v2_trigger_input_tokens", 60_000),
+        compact_v2_max_tokens=getattr(args, "compact_v2_max_tokens", 2048),
+        session_memory_summary_model=getattr(
+            args, "session_memory_summary_model", "claude-haiku-4-5-20251001"
+        ),
+        session_memory_max_summary_tokens=getattr(
+            args, "session_memory_max_summary_tokens", 2048
+        ),
+        session_memory_max_answer_tokens=getattr(
+            args, "session_memory_max_answer_tokens", 512
+        ),
     )
 
     driver = CompactionCompareDriver(
@@ -672,7 +689,13 @@ Install dependencies:
     cc_parser.add_argument(
         "--arms",
         default="baseline,headroom_default,anthropic_compact,summary_prompt",
-        help="Comma-separated arm names",
+        help=(
+            "Comma-separated arm names. Valid: baseline, headroom_default, "
+            "anthropic_compact (old tool_runner path), anthropic_compact_v2 "
+            "(server-side compact_20260112, requires Sonnet 4.6+), "
+            "anthropic_session_memory (cookbook pattern, requires Sonnet 4.6+), "
+            "openai_compact, summary_prompt"
+        ),
     )
     cc_parser.add_argument(
         "--threshold", type=int, default=50000, help="Token threshold for compaction arms"
@@ -688,6 +711,48 @@ Install dependencies:
     cc_parser.add_argument("--max-cycles", type=int, default=3, dest="max_cycles")
     cc_parser.add_argument(
         "--model-context-window", type=int, default=200000, dest="model_context_window"
+    )
+    # --- Knobs specific to anthropic_compact_v2 ---
+    cc_parser.add_argument(
+        "--compact-v2-trigger",
+        type=int,
+        default=60_000,
+        dest="compact_v2_trigger_input_tokens",
+        help=(
+            "anthropic_compact_v2: input_tokens threshold at which the "
+            "server triggers compact_20260112. Min 50000. Default 60000 "
+            "(fires on every LongMemEval case)."
+        ),
+    )
+    cc_parser.add_argument(
+        "--compact-v2-max-tokens",
+        type=int,
+        default=2048,
+        dest="compact_v2_max_tokens",
+        help=(
+            "anthropic_compact_v2: max output tokens. Bounds both the "
+            "compaction summary and the final answer. 2048 is the "
+            "minimum that avoids truncating the summary."
+        ),
+    )
+    # --- Knobs specific to anthropic_session_memory ---
+    cc_parser.add_argument(
+        "--session-memory-summary-model",
+        default="claude-haiku-4-5-20251001",
+        dest="session_memory_summary_model",
+        help="anthropic_session_memory: model used for the session memory summary call (default Haiku 4.5)",
+    )
+    cc_parser.add_argument(
+        "--session-memory-max-summary-tokens",
+        type=int,
+        default=2048,
+        dest="session_memory_max_summary_tokens",
+    )
+    cc_parser.add_argument(
+        "--session-memory-max-answer-tokens",
+        type=int,
+        default=512,
+        dest="session_memory_max_answer_tokens",
     )
     cc_parser.add_argument("-o", "--output", required=True, help="Output directory")
     cc_parser.add_argument(

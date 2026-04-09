@@ -18,12 +18,22 @@ ArmName = Literal[
     "baseline",
     "headroom_default",
     "anthropic_compact",
+    "anthropic_compact_v2",
+    "anthropic_session_memory",
     "openai_compact",
     "summary_prompt",
 ]
 
 _VALID_ARMS: frozenset[str] = frozenset(
-    ["baseline", "headroom_default", "anthropic_compact", "openai_compact", "summary_prompt"]
+    [
+        "baseline",
+        "headroom_default",
+        "anthropic_compact",
+        "anthropic_compact_v2",
+        "anthropic_session_memory",
+        "openai_compact",
+        "summary_prompt",
+    ]
 )
 
 
@@ -43,6 +53,14 @@ class CompactionCompareConfig:
     min_turn: int = 3
     max_cycles: int = 3
     model_context_window: int = 200_000
+    # --- Anthropic compact_20260112 knobs (only used by anthropic_compact_v2) ---
+    compact_v2_trigger_input_tokens: int = 60_000
+    compact_v2_max_tokens: int = 2048
+    # --- Session memory cookbook knobs (only used by anthropic_session_memory) ---
+    session_memory_answer_model: str | None = None  # None → use cfg.model
+    session_memory_summary_model: str = "claude-haiku-4-5-20251001"
+    session_memory_max_summary_tokens: int = 2048
+    session_memory_max_answer_tokens: int = 512
 
 
 @dataclass
@@ -93,11 +111,23 @@ class CompactionCompareDriver:
                 "'anthropic_compact' arm requires provider='anthropic', "
                 f"but provider={config.provider!r}"
             )
+        if "anthropic_compact_v2" in config.arms and config.provider != "anthropic":
+            raise ValueError(
+                "'anthropic_compact_v2' arm requires provider='anthropic', "
+                f"but provider={config.provider!r}"
+            )
+        if "anthropic_session_memory" in config.arms and config.provider != "anthropic":
+            raise ValueError(
+                "'anthropic_session_memory' arm requires provider='anthropic', "
+                f"but provider={config.provider!r}"
+            )
 
         # --- Validate required clients ---
         _needs_anthropic = (
             config.provider == "anthropic"
             or "anthropic_compact" in config.arms
+            or "anthropic_compact_v2" in config.arms
+            or "anthropic_session_memory" in config.arms
             or "summary_prompt" in config.arms
         )
         if _needs_anthropic and anthropic_client is None:
@@ -179,6 +209,29 @@ class CompactionCompareDriver:
                 max_cycles=cfg.max_cycles,
                 chunk_token_size=cfg.chunk_token_size,
                 max_tokens=cfg.max_tokens,
+            )
+
+        if arm == "anthropic_compact_v2":
+            from headroom.evals.runners.anthropic_compact_v2 import AnthropicCompactV2Runner
+
+            return AnthropicCompactV2Runner(
+                client=self._anthropic_client,
+                model=cfg.model,
+                trigger_input_tokens=cfg.compact_v2_trigger_input_tokens,
+                max_tokens=cfg.compact_v2_max_tokens,
+            )
+
+        if arm == "anthropic_session_memory":
+            from headroom.evals.runners.anthropic_session_memory import (
+                AnthropicSessionMemoryRunner,
+            )
+
+            return AnthropicSessionMemoryRunner(
+                client=self._anthropic_client,
+                answer_model=cfg.session_memory_answer_model or cfg.model,
+                summary_model=cfg.session_memory_summary_model,
+                max_summary_tokens=cfg.session_memory_max_summary_tokens,
+                max_answer_tokens=cfg.session_memory_max_answer_tokens,
             )
 
         raise ValueError(f"Unknown arm: {arm!r}")  # should be unreachable

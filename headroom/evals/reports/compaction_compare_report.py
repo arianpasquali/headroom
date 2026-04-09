@@ -42,6 +42,11 @@ class ScoredCase:
     n_iterations: int
     n_compactions: int
     error: str | None = None
+    # New fields added 2026-04-09 to distinguish wall-clock from user-visible
+    # latency (relevant for proactive-background arms like
+    # anthropic_session_memory) and to track per-case API cost.
+    user_visible_latency_ms: float | None = None
+    cost_usd: float = 0.0
 
 
 @dataclass
@@ -67,6 +72,11 @@ class ArmAggregate:
     mean_n_compactions: float
     # Per-question-type breakdown
     quality_correct_rate_by_qtype: dict[str, float] = field(default_factory=dict)
+    # New fields added 2026-04-09
+    p50_user_visible_latency_ms: float = 0.0
+    p95_user_visible_latency_ms: float = 0.0
+    total_cost_usd: float = 0.0
+    mean_cost_per_case_usd: float = 0.0
 
 
 @dataclass
@@ -110,6 +120,8 @@ def score_report(
                     final_input_tokens=result.final_input_tokens,
                     original_input_tokens=result.original_input_tokens,
                     latency_ms=result.latency_ms,
+                    user_visible_latency_ms=result.user_visible_latency_ms,
+                    cost_usd=result.cost_usd,
                     n_iterations=result.n_iterations,
                     n_compactions=result.n_compactions,
                     error=result.error,
@@ -127,6 +139,8 @@ def score_report(
                     final_input_tokens=result.final_input_tokens,
                     original_input_tokens=result.original_input_tokens,
                     latency_ms=result.latency_ms,
+                    user_visible_latency_ms=result.user_visible_latency_ms,
+                    cost_usd=result.cost_usd,
                     n_iterations=result.n_iterations,
                     n_compactions=result.n_compactions,
                     error=None,
@@ -145,6 +159,8 @@ def score_report(
                     final_input_tokens=result.final_input_tokens,
                     original_input_tokens=result.original_input_tokens,
                     latency_ms=result.latency_ms,
+                    user_visible_latency_ms=result.user_visible_latency_ms,
+                    cost_usd=result.cost_usd,
                     n_iterations=result.n_iterations,
                     n_compactions=result.n_compactions,
                     error=None,
@@ -195,18 +211,31 @@ def score_report(
             statistics.mean(sc.final_input_tokens for sc in non_error) if non_error else 0.0
         )
 
+        def _percentiles(values: list[float]) -> tuple[float, float]:
+            if len(values) >= 2:
+                p50 = statistics.median(values)
+                sorted_v = sorted(values)
+                p95_idx = int(0.95 * len(sorted_v))
+                p95 = sorted_v[min(p95_idx, len(sorted_v) - 1)]
+                return p50, p95
+            if len(values) == 1:
+                return values[0], values[0]
+            return 0.0, 0.0
+
         latencies = [sc.latency_ms for sc in non_error]
-        if len(latencies) >= 2:
-            p50 = statistics.median(latencies)
-            sorted_lat = sorted(latencies)
-            p95_idx = int(0.95 * len(sorted_lat))
-            p95 = sorted_lat[min(p95_idx, len(sorted_lat) - 1)]
-        elif len(latencies) == 1:
-            p50 = latencies[0]
-            p95 = latencies[0]
-        else:
-            p50 = 0.0
-            p95 = 0.0
+        p50, p95 = _percentiles(latencies)
+
+        # User-visible latency: None values fall back to wall-clock (the
+        # CompactionResult.__post_init__ does this at source, but be defensive).
+        user_visible_latencies = [
+            sc.user_visible_latency_ms if sc.user_visible_latency_ms is not None else sc.latency_ms
+            for sc in non_error
+        ]
+        p50_uv, p95_uv = _percentiles(user_visible_latencies)
+
+        costs = [sc.cost_usd for sc in non_error]
+        total_cost = sum(costs)
+        mean_cost = (total_cost / len(costs)) if costs else 0.0
 
         mean_n_iterations = (
             statistics.mean(sc.n_iterations for sc in non_error) if non_error else 0.0
@@ -242,6 +271,10 @@ def score_report(
                 mean_final_tokens=mean_final_tokens,
                 p50_latency_ms=p50,
                 p95_latency_ms=p95,
+                p50_user_visible_latency_ms=p50_uv,
+                p95_user_visible_latency_ms=p95_uv,
+                total_cost_usd=total_cost,
+                mean_cost_per_case_usd=mean_cost,
                 mean_n_iterations=mean_n_iterations,
                 mean_n_compactions=mean_n_compactions,
                 quality_correct_rate_by_qtype=quality_correct_rate_by_qtype,
@@ -290,9 +323,9 @@ def render_markdown(scored: CompactionCompareScored) -> str:
     lines.append("")
     header = (
         "| arm | n | compression | delta quality vs baseline"
-        " | quality correct | p50 latency | mean compactions | errors |"
+        " | quality correct | p50 wall-clock | p50 user-visible | mean $/case | mean compactions | errors |"
     )
-    sep = "|---|---|---|---|---|---|---|---|"
+    sep = "|---|---|---|---|---|---|---|---|---|---|"
     lines.append(header)
     lines.append(sep)
 
@@ -312,6 +345,8 @@ def render_markdown(scored: CompactionCompareScored) -> str:
             f" | {delta_str}"
             f" | {agg.quality_correct_rate:.1%}"
             f" | {agg.p50_latency_ms:.0f}ms"
+            f" | {agg.p50_user_visible_latency_ms:.0f}ms"
+            f" | ${agg.mean_cost_per_case_usd:.4f}"
             f" | {agg.mean_n_compactions:.1f}"
             f" | {agg.n_errors}"
             f" |"
@@ -407,6 +442,8 @@ def save_reports(
             f" | delta={agg.delta_quality_correct_rate:+.1%}"
             f" | compression={agg.mean_compression_ratio:.1%}"
             f" | latency_p50={agg.p50_latency_ms:.0f}ms"
+            f" | user_visible_p50={agg.p50_user_visible_latency_ms:.0f}ms"
+            f" | mean_cost=${agg.mean_cost_per_case_usd:.4f}"
         )
         summary_lines.append(line)
 

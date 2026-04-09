@@ -14,7 +14,12 @@ import time
 import tiktoken
 
 from headroom.evals.core import EvalCase
-from headroom.evals.runners.provider_compaction import CompactionResult
+from headroom.evals.runners._rate_limit import retry_on_rate_limit
+from headroom.evals.runners.direct_runners import _anthropic_rate_limit_exceptions
+from headroom.evals.runners.provider_compaction import (
+    CompactionResult,
+    _cost_from_usage,
+)
 
 DEFAULT_SUMMARY_PROMPT = """\
 You are summarizing a long conversation history so an assistant can answer a follow-up question without re-reading the full transcript.
@@ -111,6 +116,23 @@ class SummaryPromptRunner:
         self._max_tokens = max_tokens
         self._summary_prompt = summary_prompt
 
+    def _rate_limited_create(self, **kwargs):
+        """Call `client.messages.create` with 429 retry/backoff.
+
+        Wraps both the summarization and the final answer calls so a single
+        rate-limited request doesn't mark the whole case as failed. When the
+        anthropic SDK is unavailable (e.g. in tests using a fake client), the
+        retry wrapper becomes a pass-through.
+        """
+
+        def _do_call():
+            return self._client.messages.create(**kwargs)
+
+        retry_exceptions = _anthropic_rate_limit_exceptions()
+        if not retry_exceptions:
+            return _do_call()
+        return retry_on_rate_limit(_do_call, retry_exceptions=retry_exceptions)
+
     def run(self, case: EvalCase) -> CompactionResult:
         # 1. Parse and flatten haystack
         haystack_text = _flatten_haystack(case.context)
@@ -122,6 +144,7 @@ class SummaryPromptRunner:
         messages: list[dict] = []
         cycles_used = 0
         summary_latency_ms = 0.0
+        total_cost = 0.0
 
         start = time.monotonic()
 
@@ -154,12 +177,17 @@ class SummaryPromptRunner:
                         )
 
                         sum_start = time.monotonic()
-                        summary_response = self._client.messages.create(
+                        summary_response = self._rate_limited_create(
                             model=self._summary_model,
                             max_tokens=self._max_tokens,
                             messages=[{"role": "user", "content": prompt}],
                         )
                         summary_latency_ms += (time.monotonic() - sum_start) * 1000
+                        sum_usage = getattr(summary_response, "usage", None)
+                        if sum_usage is not None:
+                            total_cost += _cost_from_usage(
+                                self._summary_model, sum_usage
+                            )
 
                         summary_text = summary_response.content[0].text
 
@@ -182,12 +210,15 @@ class SummaryPromptRunner:
             final_input_tokens = _count_tokens_list(messages)
 
             # Final answer call
-            answer_response = self._client.messages.create(
+            answer_response = self._rate_limited_create(
                 model=self._answer_model,
                 max_tokens=self._max_tokens,
                 messages=messages,
             )
             answer = answer_response.content[0].text
+            ans_usage = getattr(answer_response, "usage", None)
+            if ans_usage is not None:
+                total_cost += _cost_from_usage(self._answer_model, ans_usage)
 
         except Exception as exc:
             latency_ms = (time.monotonic() - start) * 1000 + summary_latency_ms
@@ -200,6 +231,7 @@ class SummaryPromptRunner:
                 latency_ms=latency_ms,
                 n_iterations=len(chunks) + 1,
                 n_compactions=cycles_used,
+                cost_usd=total_cost,
                 error=str(exc),
             )
 
@@ -208,7 +240,9 @@ class SummaryPromptRunner:
             1 - (final_input_tokens / original_input_tokens) if original_input_tokens > 0 else 0.0
         )
 
-        # Total latency includes summarization overhead
+        # Total latency includes summarization overhead (this is the
+        # *synchronous* version of the session memory pattern — summaries
+        # block the answer path, so wall-clock == user-visible).
         latency_ms = (time.monotonic() - start) * 1000
 
         # 7. Compaction event count
@@ -224,4 +258,5 @@ class SummaryPromptRunner:
             latency_ms=latency_ms,
             n_iterations=n_iterations,
             n_compactions=n_compactions,
+            cost_usd=total_cost,
         )

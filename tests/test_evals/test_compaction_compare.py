@@ -223,6 +223,65 @@ class TestCompactionCompareDriver:
                 openai_client=_FakeOpenAIClient(),
             )
 
+    def test_anthropic_compact_v2_with_openai_provider_raises(self) -> None:
+        from headroom.evals.runners.compaction_compare import (
+            CompactionCompareConfig,
+            CompactionCompareDriver,
+        )
+
+        cfg = CompactionCompareConfig(
+            arms=["anthropic_compact_v2"],
+            provider="openai",
+            model="gpt-4o-mini",
+        )
+        with pytest.raises(ValueError):
+            CompactionCompareDriver(
+                cfg,
+                anthropic_client=_FakeAnthropicClient(),
+                openai_client=_FakeOpenAIClient(),
+            )
+
+    def test_anthropic_session_memory_with_openai_provider_raises(self) -> None:
+        from headroom.evals.runners.compaction_compare import (
+            CompactionCompareConfig,
+            CompactionCompareDriver,
+        )
+
+        cfg = CompactionCompareConfig(
+            arms=["anthropic_session_memory"],
+            provider="openai",
+            model="gpt-4o-mini",
+        )
+        with pytest.raises(ValueError):
+            CompactionCompareDriver(
+                cfg,
+                anthropic_client=_FakeAnthropicClient(),
+                openai_client=_FakeOpenAIClient(),
+            )
+
+    def test_anthropic_compact_v2_and_session_memory_build_runners(self) -> None:
+        """Smoke test that the driver accepts the two new arms without
+        raising and constructs the right runner types."""
+        from headroom.evals.runners.anthropic_compact_v2 import AnthropicCompactV2Runner
+        from headroom.evals.runners.anthropic_session_memory import (
+            AnthropicSessionMemoryRunner,
+        )
+        from headroom.evals.runners.compaction_compare import (
+            CompactionCompareConfig,
+            CompactionCompareDriver,
+        )
+
+        cfg = CompactionCompareConfig(
+            arms=["anthropic_compact_v2", "anthropic_session_memory"],
+            provider="anthropic",
+            model="claude-sonnet-4-6",
+        )
+        driver = CompactionCompareDriver(cfg, anthropic_client=_FakeAnthropicClient())
+        assert isinstance(driver._runners["anthropic_compact_v2"], AnthropicCompactV2Runner)
+        assert isinstance(
+            driver._runners["anthropic_session_memory"], AnthropicSessionMemoryRunner
+        )
+
     def test_missing_required_client_raises(self) -> None:
         from headroom.evals.runners.compaction_compare import (
             CompactionCompareConfig,

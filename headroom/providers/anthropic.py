@@ -47,11 +47,16 @@ _UNKNOWN_MODEL_WARNINGS: set[str] = set()
 ANTHROPIC_CONTEXT_LIMITS: dict[str, int] = {
     # Claude 4.6 (Opus 4.6) - 1M context
     "claude-opus-4-6": 1000000,
+    # Claude 4.6 (Sonnet 4.6)
+    "claude-sonnet-4-6": 200000,
     # Claude 4.5 (Opus 4.5)
     "claude-opus-4-5-20251101": 200000,
+    # Claude 4.5 (Sonnet 4.5)
+    "claude-sonnet-4-5-20250929": 200000,
     # Claude 4 (Sonnet 4, Haiku 4)
     "claude-sonnet-4-20250514": 200000,
     "claude-haiku-4-5-20251001": 200000,
+    "claude-haiku-4-5": 200000,
     # Claude 3.5
     "claude-3-5-sonnet-20241022": 200000,
     "claude-3-5-sonnet-latest": 200000,
@@ -74,11 +79,16 @@ ANTHROPIC_CONTEXT_LIMITS: dict[str, int] = {
 ANTHROPIC_PRICING: dict[str, dict[str, float]] = {
     # Claude 4.6 (Opus tier pricing)
     "claude-opus-4-6": {"input": 15.00, "output": 75.00, "cached_input": 1.50},
+    # Claude 4.6 (Sonnet tier pricing)
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
     # Claude 4.5 (Opus tier pricing)
     "claude-opus-4-5-20251101": {"input": 15.00, "output": 75.00, "cached_input": 1.50},
+    # Claude 4.5 (Sonnet tier pricing)
+    "claude-sonnet-4-5-20250929": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
     # Claude 4 (Sonnet/Haiku tier pricing)
     "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00, "cached_input": 0.08},
+    "claude-haiku-4-5": {"input": 0.80, "output": 4.00, "cached_input": 0.08},
     # Claude 3.5
     "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00, "cached_input": 0.30},
     "claude-3-5-sonnet-latest": {"input": 3.00, "output": 15.00, "cached_input": 0.30},

@@ -27,23 +27,112 @@ from headroom.evals.core import EvalCase
 
 @dataclass
 class CompactionResult:
-    """Per-case metrics from a compaction-arm run."""
+    """Per-case metrics from a compaction-arm run.
+
+    Two latency numbers are tracked:
+
+    - ``latency_ms`` is the **wall-clock** end-to-end time, including any
+      summarization / compaction work. This is what an all-synchronous
+      implementation pays.
+    - ``user_visible_latency_ms`` is the time the **user** waits for the
+      final answer. For synchronous arms (baseline, headroom_default,
+      anthropic_compact_20260112 with the compaction inline, and the default
+      summary_prompt runner) this equals ``latency_ms``. For proactive /
+      background arms (anthropic_session_memory, where the cookbook pattern
+      runs summarization off the critical path), this excludes the
+      summarization time — it reflects what a production deployment of that
+      pattern would actually show to end users.
+
+    Cost accounting:
+
+    - ``cost_usd`` is the summed cost of every API call the arm made for this
+      case, computed against the per-model pricing in
+      ``headroom/providers/anthropic.py::ANTHROPIC_PRICING``. Includes
+      ``input + cache_read + output`` token charges; cache creation is
+      charged at input rate per Anthropic's billing model. Defaults to 0.0
+      for test fixtures that don't populate it.
+    """
 
     case_id: str
     answer: str  # the model's final answer
     original_input_tokens: int  # naive token count if we'd sent the full haystack
     final_input_tokens: int  # actual tokens used (sum across iterations, post-compaction)
     compression_ratio: float  # 1 - (final / original)
-    latency_ms: float  # wall-clock end-to-end
+    latency_ms: float  # wall-clock end-to-end (includes any summarization)
     n_iterations: int  # how many iterations the loop ran
     n_compactions: int  # how many compaction events fired
+    user_visible_latency_ms: float | None = None  # time the user actually waits; None → same as latency_ms
+    cost_usd: float = 0.0  # summed API cost for this case
     error: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.user_visible_latency_ms is None:
+            self.user_visible_latency_ms = self.latency_ms
 
 
 def _count_tokens(text: str) -> int:
     """Count tokens using cl100k_base (ballpark for both Anthropic and OpenAI)."""
     enc = tiktoken.get_encoding("cl100k_base")
     return len(enc.encode(text))
+
+
+# ---------------------------------------------------------------------------
+# Cost accounting
+# ---------------------------------------------------------------------------
+
+
+def _pricing_for(model: str) -> dict[str, float]:
+    """Return per-million-token pricing for a Claude model.
+
+    Looks up the explicit ``ANTHROPIC_PRICING`` table first, then falls back
+    to pattern matching (opus / sonnet / haiku) against the model slug, and
+    finally to the ``_UNKNOWN_CLAUDE_DEFAULT``. Returns a dict with keys
+    ``input``, ``output``, ``cached_input`` (all in dollars per 1e6 tokens).
+    """
+    from headroom.providers.anthropic import (
+        ANTHROPIC_PRICING,
+        _PATTERN_DEFAULTS,
+        _UNKNOWN_CLAUDE_DEFAULT,
+    )
+
+    if model in ANTHROPIC_PRICING:
+        return ANTHROPIC_PRICING[model]
+    slug = model.lower()
+    for family, defaults in _PATTERN_DEFAULTS.items():
+        if family in slug:
+            return defaults["pricing"]  # type: ignore[return-value]
+    return _UNKNOWN_CLAUDE_DEFAULT["pricing"]  # type: ignore[return-value]
+
+
+def _cost_from_tokens(
+    model: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> float:
+    """Compute USD cost for a single API call.
+
+    Anthropic bills cache creation at the normal input rate and cache reads
+    at the cached-input rate. Our simplified model follows the same shape.
+    """
+    p = _pricing_for(model)
+    return (
+        (input_tokens + cache_creation_tokens) * p["input"] / 1_000_000
+        + cache_read_tokens * p["cached_input"] / 1_000_000
+        + output_tokens * p["output"] / 1_000_000
+    )
+
+
+def _cost_from_usage(model: str, usage) -> float:  # noqa: ANN001 — usage shape varies
+    """Compute USD cost from an anthropic SDK ``Usage`` or ``BetaUsage``."""
+    return _cost_from_tokens(
+        model=model,
+        input_tokens=getattr(usage, "input_tokens", 0) or 0,
+        output_tokens=getattr(usage, "output_tokens", 0) or 0,
+        cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+    )
 
 
 def _split_into_chunks(text: str, chunk_token_size: int) -> list[str]:
