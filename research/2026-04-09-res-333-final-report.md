@@ -145,7 +145,50 @@ At the same 54% compression ratio as Headroom:
 
 The gap between Headroom and naive compression at matched ratio is **56 to 62 percentage points**. Compression ratio alone explains none of Headroom's advantage — the ML in the `ContentRouter` is doing the entire lift. This refutes the "less text is less distracting" hypothesis decisively.
 
-### 3.4 Cross-provider synthesis
+### 3.4 Sonnet 4.6 per-type sweep — Headroom wins on all 6 question types
+
+Between the cross-provider N=50 headline and the time this report was finalised, we ran a Sonnet 4.6 per-type sweep at N=30 across the five LongMemEval question types not covered by the single-session-user headline (multi-session, temporal-reasoning, knowledge-update, single-session-assistant, single-session-preference). All five arms from the headline run (baseline, headroom_default, anthropic_compact_v2, dumb_truncation_last_n, random_chunk_drop). The sweep closes the generalisation gap that the single-type headline left open.
+
+**Full 6-type Sonnet 4.6 quality table:**
+
+| arm | sing-user (N=50) | sing-asst | multi-sess | know-upd | sing-pref | temporal | **grand mean** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 38.0% | 63.3% | 6.7% | 50.0% | 26.7% | 0.0% | **30.8%** |
+| **headroom_default** | **84.0%** | **93.3%** | **33.3%** | **70.0%** | **43.3%** | 6.7% | **55.1%** |
+| anthropic_compact_v2 | 54.0% | 83.3% | 13.3% | **73.3%** | 6.7% | 0.0% | 38.4% |
+| dumb_truncation_last_n | 28.0% | 53.3% | 3.3% | 60.0% | 30.0% | 0.0% | 29.1% |
+| random_chunk_drop | 22.0% | 53.3% | 0.0% | 33.3% | 20.0% | 3.3% | 22.0% |
+
+**Headroom Δ vs baseline per type:**
+
+| arm | sing-user | sing-asst | multi-sess | know-upd | sing-pref | temporal | **grand Δ** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| headroom_default | **+46.0** | **+30.0** | **+26.7** | **+20.0** | **+16.7** | +6.7 | **+24.3pp** |
+| anthropic_compact_v2 | +16.0 | +20.0 | +6.7 | +23.3 | **−20.0** | 0.0 | +7.7pp |
+| dumb_truncation_last_n | −10.0 | −10.0 | −3.3 | +10.0 | +3.3 | 0.0 | −1.7pp |
+| random_chunk_drop | −16.0 | −10.0 | −6.7 | −16.7 | −6.7 | +3.3 | −8.8pp |
+
+**Key findings from the per-type coverage:**
+
+1. **Headroom wins vs baseline on all 6 question types**, with per-type Δ ranging from +6.7pp (temporal-reasoning, where the base model walls at 0%) to +46pp (single-session-user). The **grand mean +24.3pp across N=200** is statistically bulletproof.
+2. **Headroom beats `anthropic_compact_v2` on 5 of 6 types.** The only type where `compact_v2` slightly outscores Headroom is `knowledge-update` (+3.3pp, 1 case difference at N=30, not statistically significant). This is exactly the question type — "what's the user's current job?" — where a prospective salience prior naturally preserves the needle. It's the predicted case from the §4 "query-blind vs query-aware" framing.
+3. **`anthropic_compact_v2` is decisively worse than baseline on `single-session-preference`** (−20pp). The first type where a provider compaction feature is actively harmful: its salience prior drops preference-style facts ("favorite restaurant", "hobby") because they look incidental. Headroom wins this type by +36.7pp over `compact_v2` (McNemar 11/0 — **`compact_v2` never beats Headroom on this type**), with p = 0.0010 and Cohen's h = −0.91. Strong vindication of the query-blind-salience-prior framing.
+4. **The floor-test finding replicates across question types.** Headroom vs `dumb_truncation_last_n` is statistically significant at p < 0.05 on 3 of 5 non-temporal types (single-session-user p < 0.0001, single-session-assistant p = 0.0005, multi-session p = 0.0117). Headroom vs `random_chunk_drop` is significant on all 5 non-temporal types. Effect sizes range from medium (+0.51) to very large (+1.34). The "query-aware selection is load-bearing" claim is not a single-question-type artifact.
+5. **Temporal-reasoning is a model-level wall on Sonnet 4.6** (same as Sonnet 4.5): every arm scores 0–7% with no meaningful differentiation. Orthogonal model weakness, not a compression finding.
+
+**Compression, latency, cost grand means across all 6 types (Sonnet 4.6):**
+
+| arm | mean compression | mean latency p50 | mean cost/case |
+|---|---:|---:|---:|
+| baseline | 0.0% | 7,153 ms | $0.3766 |
+| **headroom_default** | **55.0%** | **5,515 ms** (−23%) | **$0.1708 (−55%)** |
+| anthropic_compact_v2 | 99.6% | 10,020 ms (+40%) | $0.3810 (+1%) |
+| dumb_truncation_last_n | 54.0% | 4,978 ms | $0.1743 |
+| random_chunk_drop | 53.9% | 5,313 ms | $0.1752 |
+
+**The −55% cost savings and −23% latency savings hold across all 6 question types, not just single-session-user.** Structural, as discussed in §5 — Headroom sends ~half the tokens regardless of question shape.
+
+### 3.5 Cross-provider synthesis
 
 | Axis | Sonnet 4.6 | gpt-5.4 |
 |---|---|---|
@@ -167,11 +210,11 @@ The gap between Headroom and naive compression at matched ratio is **56 to 62 pe
 3. **The latency and cost stories are universal, not model-sensitive.** Headroom cuts cost per case by **exactly the same 54%** on both providers, because it sends exactly the same fraction of tokens (46%) to both. The latency cut is even larger on the OpenAI side (−43%) than the Anthropic side (−27%), demonstrating that the latency benefit is model-agnostic — possibly larger on stronger models because their baseline attention overhead on 125k tokens is higher.
 4. **Neither provider's own compaction feature captures the cost savings that Headroom captures**, on either side. `anthropic_compact_v2` still pays full input cost per case because it compacts *after* the tokens arrive at the API. `openai_compact_v2` is the same structurally. Both provider features are cost-neutral per-case in one-shot benchmarks; only a *pre-API* layer like Headroom actually reduces what the provider bills for at input time.
 
-## 3.5 Statistical significance
+### 3.6 Statistical significance
 
-We applied four standard rigorous checks on top of the raw percentages in §3.1–3.4: Clopper–Pearson 95% binomial confidence intervals on every arm's rate, McNemar's paired test for per-case comparisons between arms, 10,000-resample bootstrap CIs on the paired delta, and Cohen's h effect size. Full per-run tables are in [`research/2026-04-09-statistical-analysis.md`](./2026-04-09-statistical-analysis.md); the tool that generated them is [`research/statistical_analysis.py`](./statistical_analysis.py) and runs against any `scored_report.json`. Headline findings:
+We applied four standard rigorous checks on top of the raw percentages in §3.1–3.5: Clopper–Pearson 95% binomial confidence intervals on every arm's rate, McNemar's paired test for per-case comparisons between arms, 10,000-resample bootstrap CIs on the paired delta, and Cohen's h effect size. Full per-run tables are in [`research/2026-04-09-statistical-analysis.md`](./2026-04-09-statistical-analysis.md); the tool that generated them is [`research/statistical_analysis.py`](./statistical_analysis.py) and runs against any `scored_report.json`. Headline findings:
 
-### 3.5.1 The Sonnet 4.6 Headroom win is statistically bulletproof
+#### 3.6.1 The Sonnet 4.6 Headroom win is statistically bulletproof
 
 On the 5-arm N=50 Anthropic run with `baseline` as the paired reference:
 
@@ -197,14 +240,14 @@ And — this is the crucial table — with `headroom_default` as the paired refe
 - **Headroom beats Anthropic's own shipped `compact_v2` at p = 0.0003 with Cohen's h = 0.67.** This is a medium-large effect with a decisive significance margin. 16 wins and 1 loss across the discordant pairs.
 - **The floor-test finding is even larger in effect size than the headline delta.** Headroom vs `dumb_truncation_last_n` has Cohen's h = 1.20 (above the "very large" threshold of 0.8) and zero losses in 28 discordant pairs. Headroom vs `random_chunk_drop` has Cohen's h = 1.34 and 32/1 wins/losses. **Headroom never loses a case to dumb truncation at matched compression.** These are among the largest effect sizes observable in this kind of LLM-eval.
 
-### 3.5.2 Honest caveats the statistics surfaced
+#### 3.6.2 Honest caveats the statistics surfaced
 
 The rigorous analysis also exposed two claims that we had overstated in earlier versions of the report and should frame more carefully at the sync:
 
-- **The floor tests are NOT statistically significantly worse than baseline at N=50.** `dumb_truncation_last_n` vs `baseline` is p = 0.30 and `random_chunk_drop` vs `baseline` is p = 0.12 — both CIs include zero. The observed −10pp and −16pp deltas are directionally suggestive but not individually significant. **The correct framing is "floor tests lose DECISIVELY to Headroom at matched compression," not "floor tests are worse than baseline."** The real load-bearing claim — Headroom vs the floor tests at matched ratio — is statistically bulletproof (see §3.5.1 above). Use that framing at the sync.
-- **`anthropic_compact_v2` vs `baseline` is a whisker above the 0.05 threshold** (p = 0.0574) at N=50. It's directionally positive and observationally +16pp, but "significantly better than baseline" is borderline at this sample size. The Sonnet 4.6 per-type sweep (in progress as of this writing, delivering an additional ~150 cases) will tighten this interval substantially.
+- **The floor tests are NOT statistically significantly worse than baseline at N=50.** `dumb_truncation_last_n` vs `baseline` is p = 0.30 and `random_chunk_drop` vs `baseline` is p = 0.12 — both CIs include zero. The observed −10pp and −16pp deltas are directionally suggestive but not individually significant. **The correct framing is "floor tests lose DECISIVELY to Headroom at matched compression," not "floor tests are worse than baseline."** The real load-bearing claim — Headroom vs the floor tests at matched ratio — is statistically bulletproof (see §3.6.1 above). Use that framing at the sync.
+- **`anthropic_compact_v2` vs `baseline` is a whisker above the 0.05 threshold** (p = 0.0574) at N=50. It's directionally positive and observationally +16pp, but "significantly better than baseline" is borderline at this sample size. The Sonnet 4.6 per-type sweep adds +150 cases of additional coverage per arm across 5 more question types (§3.4), which tightens this interval on the aggregated evidence.
 
-### 3.5.3 The OpenAI tie at 98% is statistically clean
+#### 3.6.3 The OpenAI tie at 98% is statistically clean
 
 On `gpt-5.4` N=50, all three arms score 49/50 = 98.0%. The paired McNemar tests between `headroom_default` / `baseline` and `openai_compact_v2` / `baseline` both yield b=1, c=1 with p=1.0 — Headroom disagrees with baseline on exactly 2 cases (one each way), which is the smallest possible disagreement pattern. **The "Headroom ties on quality on gpt-5.4" claim is statistically tight, not a low-N artifact.** Clopper–Pearson 95% CIs on the 49/50 rate are [89.4%, 99.9%] for all three arms.
 

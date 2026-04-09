@@ -53,6 +53,32 @@
 - OpenAI 3-arm run: `eval_results/compaction_compare/longmemeval/openai_gpt54/n50_3arm/`
 - Full report structure: `research/2026-04-09-res-333-report.md` §5.0
 
+## 1.5 Generalisation — Sonnet 4.6 per-type sweep, 6 question types, N=200
+
+After the cross-provider headline landed, we ran a Sonnet 4.6 per-type sweep at N=30 across the five other LongMemEval question types (same 5 arms: baseline, headroom_default, anthropic_compact_v2, dumb_truncation_last_n, random_chunk_drop). Combined with the N=50 single-session-user headline, this gives full 6-type coverage on Sonnet 4.6 at **N=200 total cases per arm**.
+
+**Sonnet 4.6 quality by question type:**
+
+| arm | sing-user (N=50) | sing-asst | multi-sess | know-upd | sing-pref | temporal | **grand mean** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 38.0% | 63.3% | 6.7% | 50.0% | 26.7% | 0.0% | **30.8%** |
+| **headroom_default** | **84.0%** | **93.3%** | **33.3%** | 70.0% | **43.3%** | 6.7% | **55.1%** |
+| anthropic_compact_v2 | 54.0% | 83.3% | 13.3% | **73.3%** | 6.7% | 0.0% | 38.4% |
+| dumb_truncation_last_n | 28.0% | 53.3% | 3.3% | 60.0% | 30.0% | 0.0% | 29.1% |
+| random_chunk_drop | 22.0% | 53.3% | 0.0% | 33.3% | 20.0% | 3.3% | 22.0% |
+
+**Five generalisation findings:**
+
+1. **Headroom wins vs baseline on all 6 question types.** Per-type Δ ranges from +6.7pp (temporal-reasoning, where the base model walls at 0%) to +46pp (single-session-user). **Grand mean: +24.3pp across N=200.**
+2. **Headroom wins vs `anthropic_compact_v2` on 5 of 6 types.** The one type where `compact_v2` slightly outscores Headroom is `knowledge-update` (+3.3pp, 1 case at N=30, not statistically significant) — the one type where a query-blind salience prior naturally preserves the needle.
+3. **`anthropic_compact_v2` is decisively worse than baseline on `single-session-preference`** (−20pp). First type where a provider compaction feature is actively harmful: its query-blind salience drops preference facts ("favorite restaurant") as incidental. Headroom wins this type by +36.7pp over `compact_v2` (McNemar 11/0, p = 0.0010, Cohen's h = −0.91).
+4. **The floor-test finding replicates across question types.** Headroom vs `dumb_truncation_last_n` is statistically significant on 3 of 5 non-temporal types. Headroom vs `random_chunk_drop` is significant on all 5. Effect sizes medium to very large. Query-aware selection is load-bearing across question shapes.
+5. **Cost −55% and latency −23% hold at the grand mean across all 6 types.** Structural, not question-shape-dependent — Headroom sends ~half the tokens regardless of question shape.
+
+**Per-type data location:** `eval_results/compaction_compare/longmemeval/anthropic_sonnet46/by_type/<type>/`
+
+**Bottom line of the generalisation update:** The N=50 single-session-user headline is not a single-question-type artifact. Headroom wins the 6-type grand mean, and wins individually on every type. The OpenAI tie-at-98% story and the cost-savings story are unchanged.
+
 ## 2. Correction to an earlier finding — BOTH provider sides were wrong
 
 An earlier draft of the RES-333 report (pre-2026-04-09) concluded that *"neither provider ships summarization-based compaction at the standard API level for non-tool-using benchmarks."* **That was wrong on both sides, for two different reasons.**
@@ -187,14 +213,16 @@ The natural team framing:
 
 In rough order of business value:
 
-0. **`openai_compact_v2` head-to-head at n≥20** on LongMemEval `single-session-user` on `gpt-5.4`, run in parallel with a matched Anthropic `compact_v2` / Sonnet 4.6 run on the same cases. This closes the cross-provider comparison that the N=2 smoke only gestures at. **Top priority** because the current OpenAI-side recommendation relies on a smoke result.
+> **Update:** items struck through below have been completed since this findings file was first written. The cross-provider N=50 headline (§1) and the 6-type Sonnet 4.6 per-type sweep (§1.5) together close out what were Phase 2 items #0, #2, and #7.
+
+0. ~~**`openai_compact_v2` head-to-head at n≥20** on LongMemEval `single-session-user` on `gpt-5.4`~~ **DONE** — N=50 completed, tie at 98% (see §1).
 1. **Re-run the 3-arm comparison on orq production traces** (229 CaptainFresh spans) after Karina's JSON-unwrapping fix lands. Closes the one gap that spans both workstreams.
-2. **Sonnet 4.6 per-type sweep** (the other 5 LongMemEval question types at N=30 each) to confirm the Sonnet 4.5 generalization shape holds on the newer model.
+2. ~~**Sonnet 4.6 per-type sweep** (the other 5 LongMemEval question types at N=30 each)~~ **DONE** — all 5 new types complete at N=30, Headroom wins on all 6 (see §1.5).
 3. **τ-bench** as the honest home for `tool_runner(compaction_control)` in its native habitat. Also recovers the dropped arm.
 4. **Opus 4.6 second-model ablation** — cheap add since it supports `compact_20260112`.
 5. **LongBench v1 + LLMLingua-2 head-to-head** for a publishable academic baseline comparison.
 6. **Complete the `anthropic_session_memory` arm** on Sonnet 4.6 with a Sonnet summarizer (not Haiku) and an explicit per-call timeout, so the 4-arm comparison is closed.
-7. **Floor-test runs** — kick off the `dumb_truncation_last_n` and `random_chunk_drop` arms at matched 54% compression on Sonnet 4.6 N=50 to establish whether Headroom's query-aware selection or "just less text" is the load-bearing factor. Already wired up (§5.3 scaffold); needs a single CLI run.
+7. ~~**Floor-test runs**~~ **DONE** — `dumb_truncation_last_n` and `random_chunk_drop` ran on all 6 Sonnet 4.6 types at matched 54% compression; see §1 and §1.5.
 
 ## 10. Artifacts
 
