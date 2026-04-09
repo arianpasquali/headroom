@@ -31,15 +31,31 @@ On Sonnet 4.6, LongMemEval `single-session-user` N=50 (~125k-token haystacks), *
 Data: `eval_results/compaction_compare/longmemeval/anthropic_sonnet46/n50/`
 Report structure: `research/2026-04-09-res-333-report.md` §5.1
 
-## 2. Correction to an earlier finding
+## 2. Correction to an earlier finding — BOTH provider sides were wrong
 
-An earlier draft of the RES-333 report (pre-2026-04-09) concluded that *"neither provider ships summarization-based compaction at the standard API level for non-tool-using benchmarks."* **That was wrong for Anthropic.**
+An earlier draft of the RES-333 report (pre-2026-04-09) concluded that *"neither provider ships summarization-based compaction at the standard API level for non-tool-using benchmarks."* **That was wrong on both sides, for two different reasons.**
 
-Anthropic shipped **`compact_20260112`** on **2026-01-12** — three months before this work began — as a first-class server-side compaction feature. It fires on plain `beta.messages.create` with a beta header, does not require tool calling, and produces a compaction content block in the response alongside the normal text block. Our installed `anthropic` SDK (0.76.0) had no typed shapes for it, and I extrapolated the "tool-loop-gated" story from reading the older deprecated `_beta_compaction_control.py` path in the SDK source without cross-checking the live docs.
+### 2.a Anthropic — `compact_20260112` is a real server-side primitive
 
-**The fix was to upgrade** `anthropic` to 0.92.0 (which has typed `BetaCompact20260112EditParam` and `BetaCompactionBlock`), write `AnthropicCompactV2Runner`, and run the actual comparison. That is the headline in §1 above.
+Anthropic shipped **`compact_20260112`** on **2026-01-12** — three months before this work began — as a first-class server-side compaction feature. It fires on plain `beta.messages.create` with a `compact-2026-01-12` beta header, does not require tool calling, and produces a compaction content block in the response alongside the normal text block. Models: Sonnet 4.6 / Opus 4.6 / Mythos Preview — **explicitly not Sonnet 4.5**, which is part of why an earlier Sonnet 4.5 probe saw nothing fire. Our installed `anthropic` SDK (0.76.0) had no typed shapes for it, and I extrapolated the "tool-loop-gated" story from reading the older deprecated `_beta_compaction_control.py` path in the SDK source without cross-checking the live docs.
 
-**The OpenAI half of the original finding still holds unchanged**: `responses.compact()` is an analytics/inspection endpoint whose result `id` is non-chainable (verified with a direct API probe — `400 previous_response_not_found`), and `responses.create(truncation="auto")` is lossy first-N-tokens drop that doesn't fire below the model's context window. OpenAI does not ship summarization compaction at the standard API level.
+**The fix was to upgrade** `anthropic` to 0.92.0 (which has typed `BetaCompact20260112EditParam` and `BetaCompactionBlock`), write `AnthropicCompactV2Runner`, and run the actual head-to-head. That is the headline in §1 above. **Headroom beats `compact_20260112` by +28pp on Sonnet 4.6 single-session-user N=50.**
+
+### 2.b OpenAI — `responses.create(context_management={"type":"compaction"})` is also real
+
+The Apr 8 conclusion that *"`responses.compact()` is an analytics/inspection endpoint whose result `id` is non-chainable"* was a **model-gating artefact** from probing on `gpt-4o-mini`, which is NOT in the supported-models list. The real feature surfaces as `responses.create(context_management={"type":"compaction","compact_threshold":N})` on the Responses API, plus a standalone `POST /responses/compact` for explicit control. [Docs](https://developers.openai.com/api/docs/guides/compaction). The compaction item IS chainable when the right model is used — `gpt-5.3-codex` or `gpt-5.4`. The guide is explicit: *"The latest models are trained to analyze prior conversation state and produce a compaction item..."* — an unsupported-model probe returns a degenerate analytics-only response even though the endpoint exists.
+
+**The fix was to upgrade the probe to `gpt-5.4`**, write `OpenAICompactV2Runner`, and verify it with a 2/2 N=2 smoke run on the same two LongMemEval cases used for the Anthropic side. Head-to-head n≥20 run is still pending as of this update.
+
+**Semantic difference worth flagging:** Anthropic's compaction block is a natural-language summary the caller can read, audit, or even edit; OpenAI's compaction item is **opaque and encrypted**, "not intended to be human-interpretable." For failure analysis, auditability, and "what got dropped" reporting, Anthropic's output is introspectable while OpenAI's is not. Headroom's output is plain text, just like Anthropic's.
+
+### 2.c Reframed positioning for Headroom
+
+Both vendors ship server-side summarization compaction on their latest models. This does **not** weaken the Headroom case — it strengthens a different, sharper claim:
+
+> **Headroom is the only cross-provider, transparent, question-aware, deterministic, inspectable context-compaction layer.** Both vendors have now confirmed that context compaction is a real problem worth solving at the platform layer; Headroom is the one the user controls, the one that works identically across providers, and — on the single benchmark we've tested head-to-head at N=50 so far — the one that wins on quality, cost, and latency simultaneously.
+
+**Footnote rule for the v2 arms.** Any comparative claim involving `openai_compact_v2` must be read with an "n=2 smoke" caveat until the n≥20 head-to-head run lands. The Anthropic side is N=50 and solid.
 
 ## 3. Why Headroom wins the head-to-head
 
@@ -114,39 +130,49 @@ That's separate from the quality and latency wins. **On a workload where Headroo
 4. **Other models** — only Sonnet 4.5 and Sonnet 4.6 tested. Opus 4.6 as a second-model ablation is Phase 2 #4. No GPT-5 data.
 5. **Other benchmarks** — LongBench v1 + LLMLingua-2 head-to-head for a publishable comparison is Phase 2 #5.
 
-## 7. A note on what's excluded from this update
+## 7. A note on what's in and out of scope for this headline
 
-This update intentionally focuses on three arms only: `baseline`, `headroom_default`, and `anthropic_compact_v2`. Other arms that existed at some point in the investigation are **not** in scope here:
+This update's **headline table in §1 has three arms**: `baseline`, `headroom_default`, and `anthropic_compact_v2`. All three ran on Sonnet 4.6 at N=50 on the same 50 LongMemEval `single-session-user` cases. That's the only fully-measured head-to-head in this document.
 
-- **`summary_prompt` (Feature A)** — our first-cut custom summarization runner with a SWE/planning JSON schema. Superseded by the clearer `anthropic_compact_v2` comparison; out of scope per the meeting decision to drop it from the canonical framing.
+**Also wired up on the branch but not in the §1 headline:**
+
+- **`openai_compact_v2`** — wraps the OpenAI Responses API `context_management={"type":"compaction"}` feature on `gpt-5.4`. Smoke verified 2/2 on April 9. Not in the headline table because it runs against a different provider/model and the driver correctly rejects mixed-provider arm lists — the cross-provider comparison requires two separate runs on the same cases. See §2.b for the correction that made this arm possible in the first place (the Apr 8 "analytics endpoint" finding was a model-gating artefact from probing `gpt-4o-mini`). **This is Phase 2 workstream 0 (top priority).**
+- **`anthropic_session_memory`** (cookbook pattern) — Anthropic's documented client-side pattern with prompt caching and a 6-section conversational schema. An earlier 4-arm N=50 attempt hung on a single Haiku 4.5 summarization call. Characterized qualitatively from N=2 smoke data. Phase 2 workstream with a Sonnet-summarizer swap.
+- **`dumb_truncation_last_n`** and **`random_chunk_drop`** (floor tests) — runners that compress to the same ratio as Headroom without any query-aware selection logic. Wired up with 12 unit tests but not yet run at N=50. Phase 2 cheap floor test to answer the skeptic question "is Headroom winning because of query-aware selection or just because less text is less distracting?"
+
+**Explicitly out of scope for this update:**
+
+- **`summary_prompt` (Feature A)** — our first-cut custom summarization runner with a SWE/planning JSON schema. Superseded by the clearer `anthropic_compact_v2` and session memory comparisons; out of scope per the meeting decision to drop it from the canonical framing.
 - **`anthropic_compact` (old `tool_runner(compaction_control)` path)** — explicitly deprecated in the 0.92 SDK with a docstring pointing to `compact_20260112`. Still only fires inside tool-runner loops, so it's not applicable to non-tool benchmarks like LongMemEval. Phase 2 τ-bench workstream is the honest home for it.
-- **`anthropic_session_memory` (cookbook pattern)** — Anthropic's documented client-side pattern with prompt caching and a 6-section conversational schema. An earlier 4-arm N=50 attempt hung on a single Haiku 4.5 summarization call. Characterized qualitatively from N=2 smoke data but not yet included in a headline comparison. Phase 2 workstream 0.5 with a Sonnet-summarizer swap.
+- **`openai_compact` (old chunked `responses.compact()` chain)** — superseded by `openai_compact_v2`. The old runner was built against the Apr 8 mistaken-analytics-endpoint understanding and is kept on the branch as a historical reference only.
 
-If any of these need to come back into the picture later, the runner code is committed on the branch and the existing tests (134 green) cover all of them.
+If any of these need to come back into the picture later, the runner code is committed on the branch and the existing tests (**156 green** as of this update) cover all of them.
 
 ## 8. Recommendation
 
 **Ship Headroom behind a feature flag for long-context workloads on both OpenAI and Anthropic surfaces.**
 
-- **On OpenAI**: no provider-native summarization compaction exists at the standard API level. Ship without reservation.
-- **On Anthropic**: head-to-head evidence on Sonnet 4.6 shows Headroom beats `compact_20260112` (which is Anthropic's own shipped feature for this problem) by +28pp on quality, at −54% cost per case and −46% latency. Ship.
+- **On Anthropic**: head-to-head evidence at N=50 on Sonnet 4.6 shows Headroom beats `compact_20260112` (Anthropic's own shipped feature for this problem) by +28pp on quality, at −54% cost per case and −46% latency. Ship on measured evidence.
+- **On OpenAI**: OpenAI also ships server-side compaction (`responses.create(context_management={"type":"compaction"})` on `gpt-5.3-codex` / `gpt-5.4`), wired up as `OpenAICompactV2Runner` and smoke-verified 2/2 on N=2 cases. **Full n≥20 head-to-head is Phase 2 workstream 0 (top priority before the ship decision is final).** The interim case for shipping rests on: (a) the cross-provider structural argument — Headroom is the only layer that works identically across both providers, (b) the audit/transparency argument — Anthropic's compaction block is a natural-language summary and OpenAI's compaction item is opaque/encrypted, whereas Headroom's output is plain text on both, and (c) the smoke result — no catastrophic quality drop observed at N=2, but "n=2 smoke" footnote applies until N≥20 lands.
 
 The natural team framing:
 
-> *"Anthropic shipped a proper compaction feature three months ago. We tested it head-to-head against Headroom on LongMemEval-style long-context recall on Sonnet 4.6. Headroom wins +28pp on quality, and is 54% cheaper and 46% faster simultaneously. Anthropic's feature isn't broken — it's a different tool for a different problem (agent continuation vs conversational recall). For our workloads, Headroom is the right fit."*
+> *"Both Anthropic and OpenAI shipped proper server-side compaction features on their latest models in the last few months. We tested Anthropic's head-to-head against Headroom on LongMemEval Sonnet 4.6 at N=50 — Headroom wins +28pp on quality, is 54% cheaper and 46% faster. We smoke-verified OpenAI's on gpt-5.4 and the runner works; the N≥20 head-to-head is queued as the top Phase 2 item. The reframing: both vendors agree this is a real problem worth solving at the platform layer. Headroom is the only cross-provider, transparent, question-aware, deterministic, inspectable layer — and on the benchmark we've tested at scale, it wins."*
 
-**Don't over-generalize.** The Sonnet 4.6 result is one model, one question type, one benchmark. The Sonnet 4.5 N=150 ablation strengthens confidence by replicating the shape across three types, but generalization to the other 5 LongMemEval types on Sonnet 4.6, to tool-using agentic workloads, and to real orq production data is still Phase 2 work.
+**Don't over-generalize.** The Sonnet 4.6 result is one model, one question type, one benchmark. The OpenAI side is N=2 smoke, not a full head-to-head. The Sonnet 4.5 N=150 ablation strengthens confidence by replicating the Headroom-advantage shape across three types, but generalization to the other 5 LongMemEval types on Sonnet 4.6, to the OpenAI side at scale, to tool-using agentic workloads, and to real orq production data is still Phase 2 work.
 
-## 9. Phase 2 priorities (unchanged)
+## 9. Phase 2 priorities
 
 In rough order of business value:
 
+0. **`openai_compact_v2` head-to-head at n≥20** on LongMemEval `single-session-user` on `gpt-5.4`, run in parallel with a matched Anthropic `compact_v2` / Sonnet 4.6 run on the same cases. This closes the cross-provider comparison that the N=2 smoke only gestures at. **Top priority** because the current OpenAI-side recommendation relies on a smoke result.
 1. **Re-run the 3-arm comparison on orq production traces** (229 CaptainFresh spans) after Karina's JSON-unwrapping fix lands. Closes the one gap that spans both workstreams.
 2. **Sonnet 4.6 per-type sweep** (the other 5 LongMemEval question types at N=30 each) to confirm the Sonnet 4.5 generalization shape holds on the newer model.
 3. **τ-bench** as the honest home for `tool_runner(compaction_control)` in its native habitat. Also recovers the dropped arm.
 4. **Opus 4.6 second-model ablation** — cheap add since it supports `compact_20260112`.
 5. **LongBench v1 + LLMLingua-2 head-to-head** for a publishable academic baseline comparison.
 6. **Complete the `anthropic_session_memory` arm** on Sonnet 4.6 with a Sonnet summarizer (not Haiku) and an explicit per-call timeout, so the 4-arm comparison is closed.
+7. **Floor-test runs** — kick off the `dumb_truncation_last_n` and `random_chunk_drop` arms at matched 54% compression on Sonnet 4.6 N=50 to establish whether Headroom's query-aware selection or "just less text" is the load-bearing factor. Already wired up (§5.3 scaffold); needs a single CLI run.
 
 ## 10. Artifacts
 
