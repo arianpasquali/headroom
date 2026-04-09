@@ -97,10 +97,12 @@ def _call_openai(
 ) -> tuple[str, float]:
     """Make a single OpenAI responses.create call.
 
-    Returns ``(answer_text, cost_usd)``. Cost is left at 0.0 for now — the
-    pricing table in ``headroom/providers/anthropic.py`` covers Claude
-    only, and we aren't running OpenAI arms in the current headline, so
-    plumbing OpenAI pricing is out of scope for this change.
+    Returns ``(answer_text, cost_usd)``. Cost is computed from
+    ``response.usage.input_tokens`` and ``response.usage.output_tokens``
+    using the per-model input/output token prices from
+    ``litellm.model_cost``. For models not in that table, or when the
+    response lacks a usage object (e.g. test fakes), cost silently falls
+    back to 0.0.
     """
     response = client.responses.create(  # type: ignore[attr-defined]
         model=model,
@@ -108,7 +110,41 @@ def _call_openai(
         max_output_tokens=max_tokens,
     )
     text = getattr(response, "output_text", "") or ""
-    return text, 0.0
+
+    # Cost accounting. Guarded so test fakes without a usage object still
+    # return cost=0.0 without raising.
+    cost = 0.0
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        input_tokens = getattr(usage, "input_tokens", 0) or 0
+        output_tokens = getattr(usage, "output_tokens", 0) or 0
+        cost = _openai_cost_from_tokens(model, input_tokens, output_tokens)
+
+    return text, cost
+
+
+def _openai_cost_from_tokens(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Look up per-token prices for ``model`` in ``litellm.model_cost`` and compute cost.
+
+    Returns 0.0 if litellm is unavailable, the model is unknown, or the
+    entry is missing price fields. All failures are silent because cost
+    accounting is a reporting convenience, not a correctness requirement
+    — a missing price shouldn't take down the run.
+    """
+    try:
+        import litellm
+    except ImportError:
+        return 0.0
+
+    model_cost = getattr(litellm, "model_cost", {}) or {}
+    entry = model_cost.get(model)
+    if entry is None:
+        return 0.0
+    in_rate = entry.get("input_cost_per_token")
+    out_rate = entry.get("output_cost_per_token")
+    if in_rate is None or out_rate is None:
+        return 0.0
+    return float(in_rate) * int(input_tokens) + float(out_rate) * int(output_tokens)
 
 
 class BaselineRunner:

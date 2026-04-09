@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Fakes — mirror the shape of openai.resources.responses.Response
 # ---------------------------------------------------------------------------
@@ -231,16 +233,37 @@ class TestOpenAICompactV2Runner:
     def test_cost_is_zero_for_unpriced_model(self) -> None:
         """When the model isn't in the pricing table, cost is 0.0 rather
         than a fabricated estimate. This keeps reports honest for
-        preview models like gpt-5.4 until real prices land in the table."""
+        preview models until real prices land in the table.
+
+        Uses a deliberately nonsense model id so this test stays valid
+        even as new OpenAI models get added to _PRICING."""
         from headroom.evals.runners.openai_compact_v2 import OpenAICompactV2Runner
 
         fake_responses = _FakeResponses(input_tokens=100_000, output_tokens=500)
         client = _FakeOpenAIClient(responses=fake_responses)
-        # gpt-5.4 is not in _PRICING yet — expect 0.0
-        runner = OpenAICompactV2Runner(client=client, model="gpt-5.4")
+        runner = OpenAICompactV2Runner(
+            client=client, model="gpt-unicorn-preview-not-in-pricing"
+        )
         result = runner.run(_make_case())
 
         assert result.cost_usd == 0.0
+
+    def test_cost_is_computed_for_gpt_5_4(self) -> None:
+        """Regression: gpt-5.4 was added to _PRICING in the cost retrofit
+        commit. Make sure the runner actually computes a non-zero cost
+        for it on a case with real token counts."""
+        from headroom.evals.runners.openai_compact_v2 import OpenAICompactV2Runner
+
+        fake_responses = _FakeResponses(input_tokens=100_000, output_tokens=500)
+        client = _FakeOpenAIClient(responses=fake_responses)
+        runner = OpenAICompactV2Runner(client=client, model="gpt-5.4")
+        result = runner.run(_make_case())
+
+        # gpt-5.4: $2.50/M input, $15/M output
+        # 100_000 input tokens × $2.50/M = $0.25
+        # 500 output tokens × $15/M = $0.0075
+        # total = $0.2575
+        assert result.cost_usd == pytest.approx(0.2575, abs=1e-4)
 
     def test_cost_is_computed_for_priced_model(self) -> None:
         """When the model IS in the pricing table, cost is computed
