@@ -311,15 +311,19 @@ def cmd_compaction_compare(
         model_context_window=args.model_context_window,
         compact_v2_trigger_input_tokens=getattr(args, "compact_v2_trigger_input_tokens", 60_000),
         compact_v2_max_tokens=getattr(args, "compact_v2_max_tokens", 2048),
+        openai_compact_v2_trigger_input_tokens=getattr(
+            args, "openai_compact_v2_trigger_input_tokens", 60_000
+        ),
+        openai_compact_v2_max_output_tokens=getattr(
+            args, "openai_compact_v2_max_output_tokens", 2048
+        ),
         session_memory_summary_model=getattr(
             args, "session_memory_summary_model", "claude-haiku-4-5-20251001"
         ),
-        session_memory_max_summary_tokens=getattr(
-            args, "session_memory_max_summary_tokens", 2048
-        ),
-        session_memory_max_answer_tokens=getattr(
-            args, "session_memory_max_answer_tokens", 512
-        ),
+        session_memory_max_summary_tokens=getattr(args, "session_memory_max_summary_tokens", 2048),
+        session_memory_max_answer_tokens=getattr(args, "session_memory_max_answer_tokens", 512),
+        floor_target_compression_ratio=getattr(args, "floor_target_compression_ratio", 0.54),
+        floor_random_chunk_token_size=getattr(args, "floor_random_chunk_token_size", 2_000),
     )
 
     driver = CompactionCompareDriver(
@@ -694,7 +698,11 @@ Install dependencies:
             "anthropic_compact (old tool_runner path), anthropic_compact_v2 "
             "(server-side compact_20260112, requires Sonnet 4.6+), "
             "anthropic_session_memory (cookbook pattern, requires Sonnet 4.6+), "
-            "openai_compact, summary_prompt"
+            "openai_compact (old chunked responses.compact chain, gpt-4o-mini-era), "
+            "openai_compact_v2 (server-side Responses API context_management, "
+            "requires GPT-5.x), summary_prompt, dumb_truncation_last_n "
+            "(floor test: keep last fraction of tokens), random_chunk_drop "
+            "(floor test: deterministic random chunk drops to target ratio)"
         ),
     )
     cc_parser.add_argument(
@@ -735,6 +743,31 @@ Install dependencies:
             "minimum that avoids truncating the summary."
         ),
     )
+    # --- Knobs specific to openai_compact_v2 ---
+    cc_parser.add_argument(
+        "--openai-compact-v2-trigger",
+        type=int,
+        default=60_000,
+        dest="openai_compact_v2_trigger_input_tokens",
+        help=(
+            "openai_compact_v2: compact_threshold passed to the Responses "
+            "API context_management parameter. The server triggers a "
+            "compaction pass when the rendered token count crosses this "
+            "threshold. Default 60000 (fires on every LongMemEval case)."
+        ),
+    )
+    cc_parser.add_argument(
+        "--openai-compact-v2-max-output-tokens",
+        type=int,
+        default=2048,
+        dest="openai_compact_v2_max_output_tokens",
+        help=(
+            "openai_compact_v2: Responses API max_output_tokens. Bounds "
+            "the final answer output; the compaction summary is server-"
+            "internal and not subject to this cap. 2048 is the safe "
+            "default inherited from the Anthropic v2 runner."
+        ),
+    )
     # --- Knobs specific to anthropic_session_memory ---
     cc_parser.add_argument(
         "--session-memory-summary-model",
@@ -753,6 +786,31 @@ Install dependencies:
         type=int,
         default=512,
         dest="session_memory_max_answer_tokens",
+    )
+    # --- Knobs specific to the floor-test arms (dumb_truncation_last_n, random_chunk_drop) ---
+    cc_parser.add_argument(
+        "--floor-target-compression-ratio",
+        type=float,
+        default=0.54,
+        dest="floor_target_compression_ratio",
+        help=(
+            "dumb_truncation_last_n / random_chunk_drop: target compression "
+            "ratio (fraction of original tokens dropped). Default 0.54 to "
+            "match Headroom's observed ratio on LongMemEval so the floor "
+            "tests are apples-to-apples with headroom_default."
+        ),
+    )
+    cc_parser.add_argument(
+        "--floor-random-chunk-token-size",
+        type=int,
+        default=2_000,
+        dest="floor_random_chunk_token_size",
+        help=(
+            "random_chunk_drop: token size of each chunk before random "
+            "sampling. Default 2000 — on a 125k-token haystack that's ~62 "
+            "chunks, enough resolution for random drops to have effect while "
+            "keeping individual chunks coherent."
+        ),
     )
     cc_parser.add_argument("-o", "--output", required=True, help="Output directory")
     cc_parser.add_argument(

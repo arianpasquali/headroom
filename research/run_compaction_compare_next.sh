@@ -36,13 +36,39 @@
 #   natural_questions            n=100, single-hop factual retrieval. ~$10–20.
 #   all_cross_dataset            All four full runs, sequentially. ~$80–130.
 #
+# Arm-specific verification (OpenAI Responses API)
+#   openai_compact_v2_smoke      2-case LongMemEval probe of the openai_compact_v2 arm
+#                                on gpt-5.4 with the server-side Responses API
+#                                context_management=[{...}] feature. Verifies the
+#                                extra_body wire shape against the live OpenAI API.
+#                                Requires OPENAI_API_KEY. ~$0 (2 cases, no judge).
+#                                ✅ VERIFIED 2026-04-09: 2/2 success, n_compactions=1,
+#                                both answers correct. See § 4.1.b of
+#                                research/2026-04-09-streamlit-reproduction-comparison.md
+#                                for the full findings and the compression-metric caveat.
+#
+#   compact_v2_headhead_smoke    Run anthropic_compact_v2 AND openai_compact_v2 on
+#                                the SAME 2 LongMemEval cases, back-to-back, writing
+#                                to separate output dirs. Lets you diff the two
+#                                vendors' compaction primitives head-to-head on
+#                                identical inputs. Requires BOTH keys. ~$0.
+#                                Motivated by the 2026-04-09 smoke finding that
+#                                openai_compact_v2 correctly answered the "commute"
+#                                case that anthropic_compact_v2 is documented to
+#                                fail on. Do NOT generalise from n=2 — use this
+#                                step to sanity-check, then scale to n≥20 with
+#                                --judge for a real comparison.
+#
 # Convenience
 #   everything                   all_longmemeval + all_cross_dataset_smokes + all_cross_dataset.
 #                                Total cost ~$100–150. Only run this if you know what you're doing.
 #
 # ─── Preconditions ────────────────────────────────────────────────────────────
 #
-#   - ANTHROPIC_API_KEY exported.
+#   - ANTHROPIC_API_KEY exported (required for every step EXCEPT
+#     openai_compact_v2_smoke; compact_v2_headhead_smoke requires BOTH).
+#   - OPENAI_API_KEY exported (required for openai_compact_v2_smoke AND
+#     compact_v2_headhead_smoke).
 #   - uv installed and on PATH.
 #   - This script lives inside the feat/compaction-compare worktree; it cd's to
 #     the worktree root on launch, so you can run it from anywhere.
@@ -55,15 +81,27 @@ WORKTREE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${WORKTREE_ROOT}"
 
 # --- Guardrails ----------------------------------------------------------------
-if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  echo "ERROR: ANTHROPIC_API_KEY is not set. Export it before running." >&2
-  exit 1
-fi
-
 if ! command -v uv >/dev/null 2>&1; then
   echo "ERROR: 'uv' is not on PATH. Install uv first." >&2
   exit 1
 fi
+
+# Per-step API key checks. Called from the relevant runner functions rather
+# than at top level so OpenAI-only steps don't demand ANTHROPIC_API_KEY and
+# vice versa.
+require_anthropic_key() {
+  if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    echo "ERROR: ANTHROPIC_API_KEY is not set. Export it before running this step." >&2
+    exit 1
+  fi
+}
+
+require_openai_key() {
+  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    echo "ERROR: OPENAI_API_KEY is not set. Export it before running this step." >&2
+    exit 1
+  fi
+}
 
 # --- Shared config -------------------------------------------------------------
 PROVIDER="anthropic"
@@ -231,6 +269,103 @@ run_smoke_natural_questions() {
 }
 
 # ==============================================================================
+# Arm-specific: openai_compact_v2 smoke against the live OpenAI Responses API
+# ==============================================================================
+#
+# Probes the openai_compact_v2 arm on gpt-5.4 with 2 LongMemEval cases and
+# --no-judge. The runner passes `context_management=[{...}]` through the
+# SDK's extra_body escape hatch because openai==2.15.0 doesn't type the
+# field yet. As of 2026-04-09 this is UNVERIFIED end-to-end — it has only
+# been tested against fakes plus two layers of live-server error iteration
+# (see research/2026-04-09-streamlit-reproduction-comparison.md § 4.1.b).
+#
+# If the run errors, inspect the exact server response with:
+#   cat /tmp/cc_smoke_openai_compact_v2/report.json | python3 -c \
+#     'import sys,json;d=json.load(sys.stdin);[print(r.get("case_id"),"→",r.get("error")) for r in d["results"]["openai_compact_v2"]]'
+
+run_openai_compact_v2_smoke() {
+  require_openai_key
+  local out="/tmp/cc_smoke_openai_compact_v2"
+  echo ">>> openai_compact_v2 smoke (2 cases, no judge, live OpenAI API) → ${out}"
+  uv run python -m headroom.evals compaction-compare \
+    --dataset longmemeval \
+    -n 2 \
+    --arms openai_compact_v2 \
+    --provider openai \
+    --model gpt-5.4 \
+    --openai-compact-v2-trigger 60000 \
+    --openai-compact-v2-max-output-tokens 2048 \
+    --no-judge \
+    -o "${out}"
+}
+
+# Head-to-head: run anthropic_compact_v2 and openai_compact_v2 back-to-back on
+# the same 2 LongMemEval cases so the outputs can be diffed manually. The
+# CompactionCompareDriver validates that every arm in a single invocation
+# belongs to the same provider (provider=anthropic rejects openai arms and
+# vice versa), so we run them as two separate CLI invocations with matching
+# -n 2 and the same dataset ordering. LongMemEval is deterministic on the
+# first N cases, so both invocations see the same two cases.
+#
+# The goal of this step is to test the "commute case" signal from the 2026-04-09
+# smoke: openai_compact_v2 answered the commute question correctly while
+# anthropic_compact_v2 is documented to fail on it. This head-to-head pins
+# that down on the exact same inputs. Do NOT generalise from n=2 — scale to
+# n≥20 with --judge before treating any claim as real.
+run_compact_v2_headhead_smoke() {
+  require_anthropic_key
+  require_openai_key
+  local anthropic_out="/tmp/cc_headhead_anthropic_compact_v2"
+  local openai_out="/tmp/cc_headhead_openai_compact_v2"
+
+  echo ">>> head-to-head smoke: anthropic_compact_v2 vs openai_compact_v2"
+  echo ">>> shared dataset: longmemeval, first 2 cases, no judge"
+  echo
+
+  echo ">>> [1/2] anthropic_compact_v2 on claude-sonnet-4-6 → ${anthropic_out}"
+  uv run python -m headroom.evals compaction-compare \
+    --dataset longmemeval \
+    -n 2 \
+    --arms anthropic_compact_v2 \
+    --provider anthropic \
+    --model claude-sonnet-4-6 \
+    --compact-v2-trigger 60000 \
+    --compact-v2-max-tokens 2048 \
+    --no-judge \
+    -o "${anthropic_out}"
+
+  echo
+  echo ">>> [2/2] openai_compact_v2 on gpt-5.4 → ${openai_out}"
+  uv run python -m headroom.evals compaction-compare \
+    --dataset longmemeval \
+    -n 2 \
+    --arms openai_compact_v2 \
+    --provider openai \
+    --model gpt-5.4 \
+    --openai-compact-v2-trigger 60000 \
+    --openai-compact-v2-max-output-tokens 2048 \
+    --no-judge \
+    -o "${openai_out}"
+
+  echo
+  echo ">>> head-to-head done. diff the two per-case answers with:"
+  echo "    python3 -c \"
+import json
+a = json.load(open('${anthropic_out}/report.json'))['results']['anthropic_compact_v2']
+o = json.load(open('${openai_out}/report.json'))['results']['openai_compact_v2']
+for ar, orr in zip(a, o):
+    print('case:', ar['case_id'])
+    print('  anthropic:', (ar.get('answer') or '')[:150])
+    print('  openai:   ', (orr.get('answer') or '')[:150])
+    print('  anthropic_latency_ms:', round(ar.get('latency_ms',0)))
+    print('  openai_latency_ms:   ', round(orr.get('latency_ms',0)))
+    print('  anthropic_n_compactions:', ar.get('n_compactions'))
+    print('  openai_n_compactions:   ', orr.get('n_compactions'))
+    print()
+\""
+}
+
+# ==============================================================================
 # Cross-dataset full runs (REQUIRE runner patch, expensive)
 # ==============================================================================
 
@@ -320,6 +455,15 @@ run_natural_questions() {
 
 STEP="${1:-}"
 
+# Key-requirement pre-dispatch: every step uses ANTHROPIC_API_KEY except
+# openai_compact_v2_smoke (which uses OPENAI_API_KEY and is gated inside its
+# own runner function) and the pure-local steps (aggregate, help, empty).
+case "${STEP}" in
+  openai_compact_v2_smoke|aggregate|""|help|-h|--help) ;;
+  compact_v2_headhead_smoke) ;;  # checks both keys inside the runner function
+  *) require_anthropic_key ;;
+esac
+
 case "${STEP}" in
   # sanity
   smoke)                       run_smoke ;;
@@ -347,6 +491,10 @@ case "${STEP}" in
     run_smoke_narrativeqa
     run_smoke_natural_questions
     ;;
+
+  # arm-specific (live OpenAI API)
+  openai_compact_v2_smoke)     run_openai_compact_v2_smoke ;;
+  compact_v2_headhead_smoke)   run_compact_v2_headhead_smoke ;;
 
   # cross-dataset full runs
   longbench_v1_suite)          run_longbench_v1_suite ;;

@@ -21,7 +21,10 @@ ArmName = Literal[
     "anthropic_compact_v2",
     "anthropic_session_memory",
     "openai_compact",
+    "openai_compact_v2",
     "summary_prompt",
+    "dumb_truncation_last_n",
+    "random_chunk_drop",
 ]
 
 _VALID_ARMS: frozenset[str] = frozenset(
@@ -32,7 +35,10 @@ _VALID_ARMS: frozenset[str] = frozenset(
         "anthropic_compact_v2",
         "anthropic_session_memory",
         "openai_compact",
+        "openai_compact_v2",
         "summary_prompt",
+        "dumb_truncation_last_n",
+        "random_chunk_drop",
     ]
 )
 
@@ -56,11 +62,17 @@ class CompactionCompareConfig:
     # --- Anthropic compact_20260112 knobs (only used by anthropic_compact_v2) ---
     compact_v2_trigger_input_tokens: int = 60_000
     compact_v2_max_tokens: int = 2048
+    # --- OpenAI Responses API compaction knobs (only used by openai_compact_v2) ---
+    openai_compact_v2_trigger_input_tokens: int = 60_000
+    openai_compact_v2_max_output_tokens: int = 2048
     # --- Session memory cookbook knobs (only used by anthropic_session_memory) ---
     session_memory_answer_model: str | None = None  # None → use cfg.model
     session_memory_summary_model: str = "claude-haiku-4-5-20251001"
     session_memory_max_summary_tokens: int = 2048
     session_memory_max_answer_tokens: int = 512
+    # --- Floor-test knobs (only used by dumb_truncation_last_n and random_chunk_drop) ---
+    floor_target_compression_ratio: float = 0.54  # matches Headroom's observed ratio
+    floor_random_chunk_token_size: int = 2_000
 
 
 @dataclass
@@ -106,6 +118,11 @@ class CompactionCompareDriver:
             raise ValueError(
                 f"'openai_compact' arm requires provider='openai', but provider={config.provider!r}"
             )
+        if "openai_compact_v2" in config.arms and config.provider != "openai":
+            raise ValueError(
+                "'openai_compact_v2' arm requires provider='openai', "
+                f"but provider={config.provider!r}"
+            )
         if "anthropic_compact" in config.arms and config.provider != "anthropic":
             raise ValueError(
                 "'anthropic_compact' arm requires provider='anthropic', "
@@ -136,7 +153,11 @@ class CompactionCompareDriver:
                 f"(arms={config.arms!r}, provider={config.provider!r})"
             )
 
-        _needs_openai = config.provider == "openai" or "openai_compact" in config.arms
+        _needs_openai = (
+            config.provider == "openai"
+            or "openai_compact" in config.arms
+            or "openai_compact_v2" in config.arms
+        )
         if _needs_openai and openai_client is None:
             raise ValueError(
                 "openai_client is required for the selected arms/provider "
@@ -232,6 +253,39 @@ class CompactionCompareDriver:
                 summary_model=cfg.session_memory_summary_model,
                 max_summary_tokens=cfg.session_memory_max_summary_tokens,
                 max_answer_tokens=cfg.session_memory_max_answer_tokens,
+            )
+
+        if arm == "openai_compact_v2":
+            from headroom.evals.runners.openai_compact_v2 import OpenAICompactV2Runner
+
+            return OpenAICompactV2Runner(
+                client=self._openai_client,
+                model=cfg.model,
+                trigger_input_tokens=cfg.openai_compact_v2_trigger_input_tokens,
+                max_output_tokens=cfg.openai_compact_v2_max_output_tokens,
+            )
+
+        if arm == "dumb_truncation_last_n":
+            from headroom.evals.runners.floor_tests import DumbTruncationLastNRunner
+
+            return DumbTruncationLastNRunner(
+                client=provider_client,
+                provider=cfg.provider,
+                model=cfg.model,
+                max_tokens=cfg.max_tokens,
+                target_compression_ratio=cfg.floor_target_compression_ratio,
+            )
+
+        if arm == "random_chunk_drop":
+            from headroom.evals.runners.floor_tests import RandomChunkDropRunner
+
+            return RandomChunkDropRunner(
+                client=provider_client,
+                provider=cfg.provider,
+                model=cfg.model,
+                max_tokens=cfg.max_tokens,
+                target_compression_ratio=cfg.floor_target_compression_ratio,
+                chunk_token_size=cfg.floor_random_chunk_token_size,
             )
 
         raise ValueError(f"Unknown arm: {arm!r}")  # should be unreachable
