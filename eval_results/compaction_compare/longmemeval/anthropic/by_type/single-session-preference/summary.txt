@@ -1,0 +1,3 @@
+baseline: n=30/90 | quality=10.0% | delta=+0.0% | compression=0.0% | latency_p50=11926ms
+headroom_default: n=30/90 | quality=33.3% | delta=+23.3% | compression=54.7% | latency_p50=7561ms
+summary_prompt: n=30/90 | quality=23.3% | delta=+13.3% | compression=39.4% | latency_p50=11600ms
