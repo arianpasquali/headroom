@@ -439,6 +439,66 @@ def load_longbench(
     return EvalSuite(name=f"LongBench_{task}", cases=cases)
 
 
+# LLMLingua-2 reports on these 16 LongBench v1 tasks. Keep this list in sync
+# with the LLMLingua-2 paper (Pan et al., 2024) Table 3 so head-to-head
+# comparisons stay apples-to-apples.
+LONGBENCH_V1_TASKS: list[str] = [
+    "narrativeqa",
+    "qasper",
+    "multifieldqa_en",
+    "hotpotqa",
+    "2wikimqa",
+    "musique",
+    "gov_report",
+    "qmsum",
+    "multi_news",
+    "trec",
+    "triviaqa",
+    "samsum",
+    "passage_count",
+    "passage_retrieval_en",
+    "lcc",
+    "repobench-p",
+]
+
+
+def load_longbench_v1_suite(
+    n_per_task: int = 50,
+    tasks: list[str] | None = None,
+) -> EvalSuite:
+    """Load multiple LongBench v1 tasks into one EvalSuite.
+
+    This is the canonical LLMLingua-2 comparison surface: by default it
+    covers the 16 tasks LLMLingua-2 reports on, so Headroom numbers can be
+    plotted head-to-head against published prompt-compression baselines.
+
+    Each underlying task is loaded via ``load_longbench(task, n=n_per_task)``
+    and the resulting cases are concatenated. Case metadata records the
+    source task name so per-task breakdowns remain possible.
+
+    Dataset: https://huggingface.co/datasets/THUDM/LongBench
+
+    Args:
+        n_per_task: Number of samples to load from each task.
+        tasks: Optional explicit task list. Defaults to LONGBENCH_V1_TASKS.
+
+    Returns:
+        EvalSuite named ``"LongBench_v1_suite"`` with all cases concatenated.
+    """
+    task_list = tasks if tasks is not None else LONGBENCH_V1_TASKS
+
+    all_cases: list[EvalCase] = []
+    for task in task_list:
+        try:
+            task_suite = load_longbench(n=n_per_task, task=task)
+        except ValueError:
+            # A single task failing to load must not kill the whole suite.
+            continue
+        all_cases.extend(task_suite.cases)
+
+    return EvalSuite(name="LongBench_v1_suite", cases=all_cases)
+
+
 def load_narrativeqa(
     n: int = 100,
     split: str = "test",
@@ -499,6 +559,122 @@ def load_narrativeqa(
         )
 
     return EvalSuite(name="NarrativeQA", cases=cases)
+
+
+# Map split name → filename in the longmemeval-cleaned HF repo
+_LONGMEMEVAL_SPLIT_FILES: dict[str, str] = {
+    "longmemeval_s_cleaned": "longmemeval_s_cleaned.json",
+    "longmemeval_m_cleaned": "longmemeval_m_cleaned.json",
+    "longmemeval_oracle": "longmemeval_oracle.json",
+}
+
+
+def load_longmemeval(
+    n: int = 100,
+    split: str = "longmemeval_s_cleaned",
+    question_type: str | None = None,
+) -> EvalSuite:
+    """Load LongMemEval long-context conversational memory benchmark.
+
+    Each record in LongMemEval pairs a question with a long *haystack* of
+    prior conversation sessions (~104k tokens at p50 for the s_cleaned
+    split). The loader produces one EvalCase per question:
+
+    - context: JSON-serialized {haystack_sessions, haystack_dates} —
+      the long history that compression/compaction operates on.
+    - query: the question asked of that history.
+    - ground_truth: the canonical answer.
+
+    The file is a single large JSON array (277 MB for s_cleaned), so we
+    stream-parse it with ijson rather than loading the whole thing into
+    memory.
+
+    Dataset: https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned
+    License: MIT.
+
+    Args:
+        n: Number of questions to load.
+        split: One of "longmemeval_s_cleaned" (default, 500 Q),
+            "longmemeval_m_cleaned" (larger), or "longmemeval_oracle"
+            (oracle: only evidence sessions retained).
+        question_type: Optional filter — only yield records whose
+            question_type matches. The s_cleaned split contains 6 types:
+            "multi-session", "temporal-reasoning", "knowledge-update",
+            "single-session-user", "single-session-assistant",
+            "single-session-preference". When None, all types are included
+            (file order, which groups by type in the upstream).
+
+    Returns:
+        EvalSuite with one EvalCase per question.
+    """
+    if split not in _LONGMEMEVAL_SPLIT_FILES:
+        valid = ", ".join(_LONGMEMEVAL_SPLIT_FILES)
+        raise ValueError(f"Unknown LongMemEval split '{split}'. Valid: {valid}")
+
+    try:
+        import ijson
+    except ImportError as e:
+        raise ImportError(
+            "load_longmemeval requires the 'ijson' package. "
+            "Install with: pip install 'headroom-ai[evals]'"
+        ) from e
+
+    from huggingface_hub import HfFileSystem
+
+    fs = HfFileSystem()
+    filename = _LONGMEMEVAL_SPLIT_FILES[split]
+    hf_path = f"datasets/xiaowu0162/longmemeval-cleaned/{filename}"
+
+    suite_name = f"LongMemEval_{split}"
+    if question_type is not None:
+        suite_name = f"{suite_name}_{question_type}"
+
+    cases: list[EvalCase] = []
+    with fs.open(hf_path, "rb") as f:
+        parser = ijson.items(f, "item")
+        for record in parser:
+            if len(cases) >= n:
+                break
+
+            record_qtype = record.get("question_type", "")
+            if question_type is not None and record_qtype != question_type:
+                continue
+
+            question_id = record.get("question_id") or f"longmemeval_{len(cases)}"
+            question = record.get("question") or ""
+            answer = record.get("answer")
+            haystack_sessions = record.get("haystack_sessions") or []
+            haystack_dates = record.get("haystack_dates") or []
+
+            if not question or not haystack_sessions:
+                continue
+
+            context = json.dumps(
+                {
+                    "haystack_sessions": haystack_sessions,
+                    "haystack_dates": haystack_dates,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+            cases.append(
+                EvalCase(
+                    id=f"longmemeval_{question_id}",
+                    context=context,
+                    query=question,
+                    ground_truth=answer,
+                    metadata={
+                        "source": "LongMemEval",
+                        "split": split,
+                        "question_type": record_qtype,
+                        "num_sessions": len(haystack_sessions),
+                        "question_date": record.get("question_date", ""),
+                    },
+                )
+            )
+
+    return EvalSuite(name=suite_name, cases=cases)
 
 
 # =============================================================================
@@ -596,6 +772,107 @@ def load_bfcl(
         )
 
     return EvalSuite(name=f"BFCL_{category}", cases=cases)
+
+
+def load_nemotron_agentic_v1(
+    n: int = 100,
+    split: str = "interactive_agent",
+) -> EvalSuite:
+    """Load NVIDIA Nemotron-Agentic-v1 multi-turn tool-use trajectories.
+
+    Each trajectory is a synthetic multi-turn conversation where an agent
+    reasons, calls tools, and responds to tool output. The loader splits
+    each trajectory at the last user turn:
+
+    - context: JSON-serialized {tools, prior_messages} — what Headroom compresses
+    - query: text of the last user message
+    - ground_truth: text of the assistant's response that follows (if any)
+
+    Dataset: https://huggingface.co/datasets/nvidia/Nemotron-Agentic-v1
+    License: CC BY 4.0 (commercial use permitted).
+
+    Args:
+        n: Number of trajectories to load.
+        split: Dataset split — "interactive_agent" (19k) or "tool_calling" (316k).
+
+    Returns:
+        EvalSuite with one EvalCase per trajectory.
+    """
+    _check_datasets_installed()
+    from datasets import load_dataset
+
+    ds = load_dataset("nvidia/Nemotron-Agentic-v1", split=split)
+
+    cases: list[EvalCase] = []
+    for i, item in enumerate(ds):
+        if len(cases) >= n:
+            break
+
+        messages = item.get("messages") or []
+        tools = item.get("tools") or []
+        uuid = item.get("uuid") or f"nemotron_{i}"
+
+        if not messages:
+            continue
+
+        # Find the index of the last user turn.
+        last_user_idx = None
+        for idx in range(len(messages) - 1, -1, -1):
+            if messages[idx].get("role") == "user":
+                last_user_idx = idx
+                break
+
+        if last_user_idx is None:
+            continue  # No user turn — skip
+
+        prior = messages[:last_user_idx]  # everything before the last user turn
+        last_user = messages[last_user_idx]
+        after = messages[last_user_idx + 1 :]
+
+        # ground_truth = first assistant message after the last user turn that has
+        # substantive content (not just a tool-call dispatch).  Intermediate tool
+        # interactions (tool_calls with no plain content, tool results) are folded
+        # into the context so that the full agentic loop is preserved.
+        ground_truth: str | None = None
+        context_tail: list[dict] = []  # messages after last_user that go into context
+        for msg in after:
+            if msg.get("role") == "assistant" and msg.get("content") and not msg.get("tool_calls"):
+                # This is the substantive assistant response (no pending tool
+                # calls) — use as ground truth.
+                ground_truth = msg["content"]
+                break
+            # Tool-call dispatches (assistant messages that also carry
+            # tool_calls), tool results, and any other roles are part of the
+            # agentic reasoning chain → fold into context.
+            context_tail.append(msg)
+
+        # context = JSON of {tools, messages up to and including the last user
+        # turn, plus any intermediate tool-call/result exchanges}
+        context_obj = {
+            "tools": tools,
+            "messages": prior + [last_user] + context_tail,
+        }
+        context = json.dumps(context_obj, ensure_ascii=False, indent=2)
+
+        query = last_user.get("content") or ""
+
+        cases.append(
+            EvalCase(
+                id=f"nemotron_{uuid}",
+                context=context,
+                query=query,
+                ground_truth=ground_truth,
+                metadata={
+                    "source": "Nemotron-Agentic-v1",
+                    "split": split,
+                    "num_messages": len(messages),
+                    "num_tools": len(tools) if isinstance(tools, list) else 0,
+                    "license": item.get("license", "cc-by-4.0"),
+                },
+            )
+        )
+
+    return EvalSuite(name=f"Nemotron-Agentic-v1_{split}", cases=cases)
 
 
 def load_toolbench(
@@ -1183,9 +1460,21 @@ DATASET_REGISTRY: dict[str, dict[str, Any]] = {
         "category": "long_context",
         "default_n": 50,
     },
+    "longbench_v1_suite": {
+        "loader": load_longbench_v1_suite,
+        "description": "LongBench v1 — 16-task suite for LLMLingua-2 head-to-head comparisons",
+        "category": "long_context",
+        "default_n": None,
+    },
     "narrativeqa": {
         "loader": load_narrativeqa,
         "description": "Story comprehension requiring narrative understanding",
+        "category": "long_context",
+        "default_n": 100,
+    },
+    "longmemeval": {
+        "loader": load_longmemeval,
+        "description": "LongMemEval — long-context conversational memory benchmark (~104k tokens/Q, 500 Q across 6 question types)",
         "category": "long_context",
         "default_n": 100,
     },
@@ -1199,6 +1488,12 @@ DATASET_REGISTRY: dict[str, dict[str, Any]] = {
     "toolbench": {
         "loader": load_toolbench,
         "description": "Real-world API tool usage scenarios",
+        "category": "tool_use",
+        "default_n": 100,
+    },
+    "nemotron_agentic_v1": {
+        "loader": load_nemotron_agentic_v1,
+        "description": "NVIDIA Nemotron-Agentic-v1 — multi-turn synthetic tool-use trajectories (CC-BY-4.0)",
         "category": "tool_use",
         "default_n": 100,
     },

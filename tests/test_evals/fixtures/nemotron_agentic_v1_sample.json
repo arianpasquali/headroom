@@ -1,0 +1,68 @@
+[
+  {
+    "uuid": "fixture-001-ends-on-user",
+    "messages": [
+      {"role": "system", "content": "You are a food ordering assistant."},
+      {"role": "user", "content": "Order a pizza from Luigi's."},
+      {"role": "assistant", "content": "Sure, what size and toppings?"},
+      {"role": "user", "content": "Large, pepperoni and mushrooms."}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "place_order",
+          "description": "Place a food delivery order",
+          "parameters": {"type": "object", "properties": {"restaurant": {"type": "string"}, "items": {"type": "array"}}}
+        }
+      }
+    ],
+    "license": "cc-by-4.0",
+    "used_in": ["nano_v3"],
+    "reasoning": "User wants a pizza order."
+  },
+  {
+    "uuid": "fixture-002-ends-on-assistant",
+    "messages": [
+      {"role": "system", "content": "You are a weather assistant."},
+      {"role": "user", "content": "What's the weather in Tokyo?"},
+      {"role": "assistant", "content": "It's 18C and sunny in Tokyo today."}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get current weather for a city",
+          "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+        }
+      }
+    ],
+    "license": "cc-by-4.0",
+    "used_in": ["nano_v3"],
+    "reasoning": "Simple weather lookup."
+  },
+  {
+    "uuid": "fixture-003-with-tool-calls",
+    "messages": [
+      {"role": "system", "content": "You are a calculator assistant."},
+      {"role": "user", "content": "What is 15 * 23?"},
+      {"role": "assistant", "content": "Let me calculate that.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "multiply", "arguments": "{\"a\": 15, \"b\": 23}"}}]},
+      {"role": "tool", "tool_call_id": "call_1", "content": "345"},
+      {"role": "assistant", "content": "15 * 23 = 345."}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "multiply",
+          "description": "Multiply two numbers",
+          "parameters": {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}}
+        }
+      }
+    ],
+    "license": "cc-by-4.0",
+    "used_in": ["nano_v3"],
+    "reasoning": "Arithmetic via tool call."
+  }
+]

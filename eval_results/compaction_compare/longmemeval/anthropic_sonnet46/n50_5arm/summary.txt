@@ -1,0 +1,5 @@
+baseline: n=50/250 | quality=38.0% | delta=+0.0% | compression=0.0% | latency_p50=6286ms | user_visible_p50=6286ms | mean_cost=$0.3757
+headroom_default: n=50/250 | quality=84.0% | delta=+46.0% | compression=54.2% | latency_p50=4615ms | user_visible_p50=4615ms | mean_cost=$0.1727
+anthropic_compact_v2: n=50/250 | quality=54.0% | delta=+16.0% | compression=99.7% | latency_p50=8312ms | user_visible_p50=8312ms | mean_cost=$0.3791
+dumb_truncation_last_n: n=50/250 | quality=28.0% | delta=-10.0% | compression=54.0% | latency_p50=3707ms | user_visible_p50=3707ms | mean_cost=$0.1734
+random_chunk_drop: n=50/250 | quality=22.0% | delta=-16.0% | compression=53.8% | latency_p50=4155ms | user_visible_p50=4155ms | mean_cost=$0.1754

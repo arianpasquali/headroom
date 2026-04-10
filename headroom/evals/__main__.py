@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from headroom.evals.memory.judge import create_anthropic_judge
+
 if TYPE_CHECKING:
     from headroom.evals.core import EvalResult
 
@@ -223,6 +225,214 @@ def cmd_suite(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_compaction_compare(
+    args: argparse.Namespace,
+    _anthropic_client=None,
+    _openai_client=None,
+    _load_dataset=None,
+) -> None:
+    """Run a multi-arm compaction comparison sweep."""
+    import dataclasses
+    import json
+    import sys
+    from pathlib import Path
+
+    from headroom.evals.runners.compaction_compare import (
+        _VALID_ARMS,
+        CompactionCompareConfig,
+        CompactionCompareDriver,
+    )
+
+    # --- Parse arms ---
+    arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    invalid = [a for a in arms if a not in _VALID_ARMS]
+    if invalid:
+        print(f"Error: unknown arm(s): {invalid}. Valid: {sorted(_VALID_ARMS)}", file=sys.stderr)
+        sys.exit(1)
+
+    # --- Build clients lazily ---
+    needs_anthropic = (
+        args.provider == "anthropic" or "anthropic_compact" in arms or "summary_prompt" in arms
+    )
+    needs_openai = args.provider == "openai" or "openai_compact" in arms
+
+    if _anthropic_client is None and needs_anthropic:
+        try:
+            import anthropic as _anthropic_sdk
+
+            # Long-context runs regularly trip the org-level 2M tokens/min cap.
+            # The SDK default of 2 client-side retries is too small; bump to 10
+            # so transient 429s get absorbed by the SDK's built-in `retry-after`
+            # handling before our runner-level retry_on_rate_limit wrapper kicks in.
+            _anthropic_client = _anthropic_sdk.Anthropic(max_retries=10)
+        except ImportError:
+            print(
+                "Error: 'anthropic' SDK not installed. Run: pip install anthropic", file=sys.stderr
+            )
+            sys.exit(1)
+
+    if _openai_client is None and needs_openai:
+        try:
+            import openai as _openai_sdk
+
+            _openai_client = _openai_sdk.OpenAI()
+        except ImportError:
+            print("Error: 'openai' SDK not installed. Run: pip install openai", file=sys.stderr)
+            sys.exit(1)
+
+    # --- Load dataset ---
+    if _load_dataset is None:
+        from headroom.evals.datasets import load_dataset_by_name as _load_dataset
+
+    extra_kwargs: dict = {}
+    if args.dataset == "longmemeval" and getattr(args, "question_type", None):
+        extra_kwargs["question_type"] = args.question_type
+
+    if args.dataset == "longbench_v1_suite":
+        suite = _load_dataset(args.dataset, n_per_task=args.n)
+    else:
+        suite = _load_dataset(args.dataset, n=args.n, **extra_kwargs)
+
+    # --- Build config and driver ---
+    # Use getattr with defaults for the new arm-specific flags so older
+    # test fixtures that build a bare argparse.Namespace still work.
+    config = CompactionCompareConfig(
+        arms=arms,
+        provider=args.provider,
+        model=args.model,
+        summary_model=args.summary_model,
+        max_tokens=args.max_tokens,
+        threshold=args.threshold,
+        chunk_token_size=args.chunk_token_size,
+        trigger_fill=args.trigger_fill,
+        keep_recent=args.keep_recent,
+        min_turn=args.min_turn,
+        max_cycles=args.max_cycles,
+        model_context_window=args.model_context_window,
+        compact_v2_trigger_input_tokens=getattr(args, "compact_v2_trigger_input_tokens", 60_000),
+        compact_v2_max_tokens=getattr(args, "compact_v2_max_tokens", 2048),
+        openai_compact_v2_trigger_input_tokens=getattr(
+            args, "openai_compact_v2_trigger_input_tokens", 60_000
+        ),
+        openai_compact_v2_max_output_tokens=getattr(
+            args, "openai_compact_v2_max_output_tokens", 2048
+        ),
+        session_memory_summary_model=getattr(
+            args, "session_memory_summary_model", "claude-haiku-4-5-20251001"
+        ),
+        session_memory_max_summary_tokens=getattr(args, "session_memory_max_summary_tokens", 2048),
+        session_memory_max_answer_tokens=getattr(args, "session_memory_max_answer_tokens", 512),
+        floor_target_compression_ratio=getattr(args, "floor_target_compression_ratio", 0.54),
+        floor_random_chunk_token_size=getattr(args, "floor_random_chunk_token_size", 2_000),
+    )
+
+    driver = CompactionCompareDriver(
+        config=config,
+        anthropic_client=_anthropic_client,
+        openai_client=_openai_client,
+    )
+
+    # --- Run with per-case progress printing ---
+    # Monkey-patch driver.run to intercept results as they're produced.
+    # Simpler: just run normally and print after; driver.run collects all results.
+    report = driver.run(suite)
+
+    # Print per-case progress
+    for arm in arms:
+        arm_results = report.results.get(arm, [])
+        for result in arm_results:
+            print(
+                f"[arm={arm} case={result.case_id}] "
+                f"tokens={result.final_input_tokens} "
+                f"ratio={result.compression_ratio:.3f} "
+                f"latency={result.latency_ms:.0f}ms"
+            )
+
+    # --- Write output ---
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Serialize report: convert errors dict (tuple keys) to string keys
+    results_dict = {
+        arm: [dataclasses.asdict(r) for r in results] for arm, results in report.results.items()
+    }
+    errors_dict = {f"{arm}:{case_id}": msg for (arm, case_id), msg in report.errors.items()}
+    report_data = {
+        "suite_name": report.suite_name,
+        "config": dataclasses.asdict(config),
+        "results": results_dict,
+        "errors": errors_dict,
+    }
+    with open(output_dir / "report.json", "w") as f:
+        json.dump(report_data, f, indent=2)
+
+    # --- Per-arm summary ---
+    summary_lines = []
+    for arm in arms:
+        arm_results = report.results.get(arm, [])
+        n_success = sum(1 for r in arm_results if not r.error)
+        n_errors = len(arm_results) - n_success
+        mean_ratio = (
+            sum(r.compression_ratio for r in arm_results if not r.error) / n_success
+            if n_success > 0
+            else 0.0
+        )
+        mean_latency = (
+            sum(r.latency_ms for r in arm_results if not r.error) / n_success
+            if n_success > 0
+            else 0.0
+        )
+        mean_compactions = (
+            sum(r.n_compactions for r in arm_results if not r.error) / n_success
+            if n_success > 0
+            else 0.0
+        )
+        line = (
+            f"{arm}: n_success={n_success} n_errors={n_errors} "
+            f"mean_compression_ratio={mean_ratio:.3f} "
+            f"mean_latency_ms={mean_latency:.1f} "
+            f"mean_compaction_events={mean_compactions:.2f}"
+        )
+        summary_lines.append(line)
+
+    summary_text = "\n".join(summary_lines) + "\n"
+    with open(output_dir / "summary.txt", "w") as f:
+        f.write(summary_text)
+    print(summary_text, end="")
+
+    # --- Warn if >50% per-arm error rate ---
+    for arm in arms:
+        arm_results = report.results.get(arm, [])
+        if arm_results:
+            n_errors = sum(1 for r in arm_results if r.error)
+            if n_errors / len(arm_results) > 0.5:
+                print(
+                    f"WARNING: arm '{arm}' had {n_errors}/{len(arm_results)} errors (>{50}%)",
+                    file=sys.stderr,
+                )
+
+    # --- Quality scoring (unless --no-judge) ---
+    if not getattr(args, "no_judge", False):
+        from headroom.evals.reports.compaction_compare_report import save_reports, score_report
+
+        judge = create_anthropic_judge(model=getattr(args, "judge_model", "claude-haiku-4-5"))
+        scored = score_report(report, suite, judge)
+        paths = save_reports(scored, output_dir)
+        print("\nScored reports written:")
+        for fmt, path in paths.items():
+            print(f"  {fmt}: {path}")
+        # Print the headline table to stdout for immediate feedback
+        md_text = (output_dir / "report.md").read_text()
+        # Print up to the first blank line after the Results table
+        in_results = False
+        for line in md_text.splitlines():
+            print(line)
+            if line.startswith("## Results"):
+                in_results = True
+            elif in_results and line.startswith("## ") and not line.startswith("## Results"):
+                break
+
+
 def cmd_report(args: argparse.Namespace) -> None:
     """Generate HTML report from results."""
     import json
@@ -392,6 +602,7 @@ Examples:
   python -m headroom.evals suite --tier 2               # Run Tiers 1+2 (~$8)
   python -m headroom.evals suite --tier 1 --ci          # CI mode (exit 1 on fail)
   python -m headroom.evals report -i results.json       # Generate HTML report
+  python -m headroom.evals compaction-compare --dataset longmemeval -n 50 --arms baseline,headroom_default --provider anthropic --model claude-sonnet-4-5-20250514 -o eval_results/
 
 Available datasets by category:
   RAG:          hotpotqa, natural_questions, triviaqa, msmarco, squad
@@ -458,6 +669,164 @@ Install dependencies:
     report_parser.add_argument("-i", "--input", required=True, help="Input JSON results file")
     report_parser.add_argument("-o", "--output", help="Output HTML file")
     report_parser.set_defaults(func=cmd_report)
+
+    # Compaction-compare command
+    cc_parser = subparsers.add_parser(
+        "compaction-compare",
+        help="Cross-arm comparison of compression / compaction strategies on long-context datasets",
+    )
+    cc_parser.add_argument(
+        "--dataset", default="longmemeval", help="Dataset name from DATASET_REGISTRY"
+    )
+    cc_parser.add_argument("-n", "--n", type=int, default=50, dest="n", help="Number of cases")
+    cc_parser.add_argument(
+        "--question-type",
+        dest="question_type",
+        default=None,
+        help=(
+            "LongMemEval-only: filter to a single question_type. One of: "
+            "multi-session, temporal-reasoning, knowledge-update, "
+            "single-session-user, single-session-assistant, "
+            "single-session-preference. Ignored for other datasets."
+        ),
+    )
+    cc_parser.add_argument(
+        "--arms",
+        default="baseline,headroom_default,anthropic_compact,summary_prompt",
+        help=(
+            "Comma-separated arm names. Valid: baseline, headroom_default, "
+            "anthropic_compact (old tool_runner path), anthropic_compact_v2 "
+            "(server-side compact_20260112, requires Sonnet 4.6+), "
+            "anthropic_session_memory (cookbook pattern, requires Sonnet 4.6+), "
+            "openai_compact (old chunked responses.compact chain, gpt-4o-mini-era), "
+            "openai_compact_v2 (server-side Responses API context_management, "
+            "requires GPT-5.x), summary_prompt, dumb_truncation_last_n "
+            "(floor test: keep last fraction of tokens), random_chunk_drop "
+            "(floor test: deterministic random chunk drops to target ratio)"
+        ),
+    )
+    cc_parser.add_argument(
+        "--threshold", type=int, default=50000, help="Token threshold for compaction arms"
+    )
+    cc_parser.add_argument("--provider", choices=["anthropic", "openai"], default="anthropic")
+    cc_parser.add_argument("--model", required=True, help="Answer model id")
+    cc_parser.add_argument("--summary-model", default="claude-haiku-4-5", dest="summary_model")
+    cc_parser.add_argument("--chunk-token-size", type=int, default=10000, dest="chunk_token_size")
+    cc_parser.add_argument("--max-tokens", type=int, default=1024, dest="max_tokens")
+    cc_parser.add_argument("--trigger-fill", type=float, default=0.70, dest="trigger_fill")
+    cc_parser.add_argument("--keep-recent", type=int, default=4, dest="keep_recent")
+    cc_parser.add_argument("--min-turn", type=int, default=3, dest="min_turn")
+    cc_parser.add_argument("--max-cycles", type=int, default=3, dest="max_cycles")
+    cc_parser.add_argument(
+        "--model-context-window", type=int, default=200000, dest="model_context_window"
+    )
+    # --- Knobs specific to anthropic_compact_v2 ---
+    cc_parser.add_argument(
+        "--compact-v2-trigger",
+        type=int,
+        default=60_000,
+        dest="compact_v2_trigger_input_tokens",
+        help=(
+            "anthropic_compact_v2: input_tokens threshold at which the "
+            "server triggers compact_20260112. Min 50000. Default 60000 "
+            "(fires on every LongMemEval case)."
+        ),
+    )
+    cc_parser.add_argument(
+        "--compact-v2-max-tokens",
+        type=int,
+        default=2048,
+        dest="compact_v2_max_tokens",
+        help=(
+            "anthropic_compact_v2: max output tokens. Bounds both the "
+            "compaction summary and the final answer. 2048 is the "
+            "minimum that avoids truncating the summary."
+        ),
+    )
+    # --- Knobs specific to openai_compact_v2 ---
+    cc_parser.add_argument(
+        "--openai-compact-v2-trigger",
+        type=int,
+        default=60_000,
+        dest="openai_compact_v2_trigger_input_tokens",
+        help=(
+            "openai_compact_v2: compact_threshold passed to the Responses "
+            "API context_management parameter. The server triggers a "
+            "compaction pass when the rendered token count crosses this "
+            "threshold. Default 60000 (fires on every LongMemEval case)."
+        ),
+    )
+    cc_parser.add_argument(
+        "--openai-compact-v2-max-output-tokens",
+        type=int,
+        default=2048,
+        dest="openai_compact_v2_max_output_tokens",
+        help=(
+            "openai_compact_v2: Responses API max_output_tokens. Bounds "
+            "the final answer output; the compaction summary is server-"
+            "internal and not subject to this cap. 2048 is the safe "
+            "default inherited from the Anthropic v2 runner."
+        ),
+    )
+    # --- Knobs specific to anthropic_session_memory ---
+    cc_parser.add_argument(
+        "--session-memory-summary-model",
+        default="claude-haiku-4-5-20251001",
+        dest="session_memory_summary_model",
+        help="anthropic_session_memory: model used for the session memory summary call (default Haiku 4.5)",
+    )
+    cc_parser.add_argument(
+        "--session-memory-max-summary-tokens",
+        type=int,
+        default=2048,
+        dest="session_memory_max_summary_tokens",
+    )
+    cc_parser.add_argument(
+        "--session-memory-max-answer-tokens",
+        type=int,
+        default=512,
+        dest="session_memory_max_answer_tokens",
+    )
+    # --- Knobs specific to the floor-test arms (dumb_truncation_last_n, random_chunk_drop) ---
+    cc_parser.add_argument(
+        "--floor-target-compression-ratio",
+        type=float,
+        default=0.54,
+        dest="floor_target_compression_ratio",
+        help=(
+            "dumb_truncation_last_n / random_chunk_drop: target compression "
+            "ratio (fraction of original tokens dropped). Default 0.54 to "
+            "match Headroom's observed ratio on LongMemEval so the floor "
+            "tests are apples-to-apples with headroom_default."
+        ),
+    )
+    cc_parser.add_argument(
+        "--floor-random-chunk-token-size",
+        type=int,
+        default=2_000,
+        dest="floor_random_chunk_token_size",
+        help=(
+            "random_chunk_drop: token size of each chunk before random "
+            "sampling. Default 2000 — on a 125k-token haystack that's ~62 "
+            "chunks, enough resolution for random drops to have effect while "
+            "keeping individual chunks coherent."
+        ),
+    )
+    cc_parser.add_argument("-o", "--output", required=True, help="Output directory")
+    cc_parser.add_argument(
+        "--judge-model",
+        default="claude-haiku-4-5",
+        dest="judge_model",
+        help="Anthropic model to use for quality scoring (default: claude-haiku-4-5)",
+    )
+    cc_parser.add_argument(
+        "--no-judge",
+        action="store_true",
+        dest="no_judge",
+        default=False,
+        help="Skip quality scoring (useful for cheap dry runs)",
+    )
+    cc_parser.set_defaults(func=cmd_compaction_compare)
 
     args = parser.parse_args()
 

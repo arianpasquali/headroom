@@ -1,0 +1,3 @@
+baseline: n=50/150 | quality=98.0% | delta=+0.0% | compression=0.0% | latency_p50=7096ms | user_visible_p50=7096ms | mean_cost=$0.2836
+headroom_default: n=50/150 | quality=98.0% | delta=+0.0% | compression=54.2% | latency_p50=4038ms | user_visible_p50=4038ms | mean_cost=$0.1301
+openai_compact_v2: n=50/150 | quality=98.0% | delta=+0.0% | compression=1.1% | latency_p50=14288ms | user_visible_p50=14288ms | mean_cost=$0.2807
